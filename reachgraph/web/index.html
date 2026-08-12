@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reachgraph</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30'%3E%3Ccircle cx='7' cy='8' r='2.6' fill='%2335C6E8'/%3E%3Ccircle cx='23' cy='8' r='2.6' fill='%2335C6E8'/%3E%3Ccircle cx='15' cy='23' r='2.6' fill='%2335C6E8'/%3E%3Cline x1='9' y1='9.2' x2='21' y2='9.2' stroke='%2335C6E8' stroke-width='1.6'/%3E%3Cline x1='8' y1='10' x2='14' y2='21' stroke='%2335C6E8' stroke-width='1.6'/%3E%3Cline x1='22' y1='10' x2='16' y2='21' stroke='%2335C6E8' stroke-width='1.6'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0A0D10; --surface: #12161A; --surface-2: #171C21; --surface-3: #191F24;
+    --ink: #E7ECEE; --ink-soft: #8D9AA3; --ink-faint: #7E8A93;
+    --line: #212930; --line-strong: #2C363E;
+    --accent: #35C6E8; --accent-strong: #7EE0F5; --accent-wash: rgba(53,198,232,.14); --accent-ink: #04222B;
+    --crit: #FF6259; --crit-wash: rgba(255,98,89,.14);
+    --high: #FFA24D; --high-wash: rgba(255,162,77,.14);
+    --med:  #F0CB4E; --med-wash: rgba(240,203,78,.14);
+    --good: #4FCE84; --good-wash: rgba(79,206,132,.12);
+    --neutral-node: #3A444C;
+    --shadow: rgba(0,0,0,.45);
+    --sans: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    --mono: "SFMono-Regular", "JetBrains Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); font-size: 14.5px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased; overflow-x: auto; overflow-y: hidden;
+  }
+  button { font: inherit; color: inherit; }
+  ::selection { background: var(--accent-wash); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+  .mono { font-family: var(--mono); }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }
+
+  /* ---------- shell ---------- */
+  .app { display: grid; grid-template-columns: 60px 1fr; height: 100vh; min-width: 900px; }
+  .rail { background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; padding: 16px 0; gap: 4px; }
+  .rail-mark { width: 30px; height: 30px; margin-bottom: 18px; color: var(--accent); }
+  .rail-btn { width: 38px; height: 38px; border-radius: 9px; border: none; background: transparent; color: var(--ink-faint); display: flex; align-items: center; justify-content: center; cursor: pointer; position: relative; transition: background 120ms ease, color 120ms ease; }
+  .rail-btn svg { width: 19px; height: 19px; }
+  .rail-btn:hover { background: var(--surface-2); color: var(--ink-soft); }
+  .rail-btn.active { background: var(--accent-wash); color: var(--accent); }
+  .rail-btn.active::before { content: ""; position: absolute; left: -12px; top: 8px; bottom: 8px; width: 2.5px; border-radius: 2px; background: var(--accent); }
+  .rail-spacer { flex: 1; }
+  .rail-org { width: 32px; height: 32px; border-radius: 8px; background: var(--accent); color: var(--accent-ink); display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-weight: 700; font-size: 11px; border: none; }
+
+  .main-col { display: flex; flex-direction: column; min-width: 0; }
+  .topbar { height: 52px; flex: 0 0 auto; border-bottom: 1px solid var(--line); display: flex; align-items: center; padding: 0 20px; gap: 14px; }
+  .crumbs { font-size: 13px; color: var(--ink-faint); white-space: nowrap; }
+  .crumbs .current { color: var(--ink); font-weight: 600; }
+  .topbar-spacer { flex: 1; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; padding: 4px 9px; border-radius: 20px; border: 1px solid var(--line-strong); color: var(--ink-faint); }
+  .badge.on { color: var(--good); border-color: transparent; background: var(--good-wash); }
+  .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  .content { flex: 1; overflow-y: auto; }
+  .view { padding: 28px 36px 80px; }
+  .view-wide { max-width: 1180px; }
+  .view-narrow { max-width: 720px; }
+
+  h1.page-title { font-size: 20px; font-weight: 700; margin: 0 0 4px; letter-spacing: -.01em; }
+  p.page-sub { margin: 0 0 24px; color: var(--ink-faint); font-size: 13.5px; }
+
+  /* ---------- scan launcher ---------- */
+  .tabs { display: flex; gap: 2px; background: var(--surface-2); border-radius: 8px; padding: 3px; width: fit-content; margin-bottom: 16px; }
+  .tab { border: none; background: none; padding: 7px 16px; border-radius: 6px; font-size: 13px; font-weight: 600; color: var(--ink-faint); cursor: pointer; }
+  .tab.active { background: var(--surface); color: var(--ink); }
+  .scan-form { display: flex; gap: 8px; margin-bottom: 8px; }
+  .scan-form input { flex: 1; background: var(--surface); border: 1px solid var(--line-strong); color: var(--ink); border-radius: 8px; padding: 11px 14px; font-size: 14px; font-family: var(--mono); outline: none; }
+  .scan-form input:focus { border-color: var(--accent); }
+  .btn { border-radius: 8px; padding: 11px 20px; font-size: 14px; font-weight: 700; cursor: pointer; border: 1px solid transparent; }
+  .btn-primary { background: var(--accent); color: var(--accent-ink); }
+  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-primary:disabled { opacity: .5; cursor: default; }
+  .btn-ghost { background: transparent; border-color: var(--line-strong); color: var(--ink-soft); padding: 7px 14px; font-size: 13px; border-radius: 7px; }
+  .btn-ghost:hover { background: var(--surface-2); }
+  .hint { font-size: 12px; color: var(--ink-faint); margin: 0 0 30px; }
+  .hint code { font-family: var(--mono); background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+
+  .status-row { font-size: 13.5px; color: var(--ink-soft); padding: 10px 0; display: none; align-items: center; gap: 10px; }
+  .status-row.visible { display: flex; }
+  .spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin .7s linear infinite; flex: 0 0 auto; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .error-box { display: none; background: var(--crit-wash); border: 1px solid var(--crit); color: var(--crit); border-radius: 8px; padding: 12px 16px; font-size: 13.5px; margin: 4px 0 20px; }
+  .error-box.visible { display: block; }
+
+  /* ---------- repo grid ---------- */
+  .section-label { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-faint); font-weight: 700; margin: 34px 0 12px; }
+  .repo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+  .repo-card { background: var(--surface); border: 1px solid var(--line); border-radius: 9px; padding: 14px 16px; cursor: pointer; text-align: left; transition: border-color 120ms ease, background 120ms ease; }
+  .repo-card:hover { border-color: var(--accent); background: var(--surface-2); }
+  .repo-card .name { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--ink); word-break: break-all; }
+  .repo-card .re-scan { font-size: 11px; color: var(--ink-faint); margin-top: 5px; }
+  .empty-note { color: var(--ink-faint); font-size: 13px; padding: 10px 0; }
+
+  /* ---------- result view ---------- */
+  .result-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
+  .result-head h1 { font-size: 19px; font-weight: 700; margin: 0 0 8px; font-family: var(--mono); }
+  .stat-row { display: flex; gap: 22px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink-faint); }
+  .stat-row b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
+  .score-badge { text-align: center; flex: 0 0 auto; }
+  .score-badge .num { font-family: var(--mono); font-size: 30px; font-weight: 700; line-height: 1; }
+  .score-badge .lbl { font-size: 10px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-faint); margin-top: 4px; }
+
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .panel-head h2 { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-faint); margin: 0; font-weight: 700; }
+
+  #graph-panel { margin-bottom: 20px; }
+  #graph-canvas { width: 100%; height: 420px; }
+  .graph-legend { display: flex; gap: 16px; padding: 10px 16px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--ink-faint); flex-wrap: wrap; }
+  .graph-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .graph-legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .graph-hint { padding: 8px 16px; font-size: 11.5px; color: var(--ink-faint); border-top: 1px solid var(--line); }
+
+  .result-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px; align-items: start; }
+  @media (max-width: 1080px) { .result-grid { grid-template-columns: 1fr; } }
+
+  .path-list { display: flex; flex-direction: column; gap: 1px; background: var(--line); max-height: 560px; overflow-y: auto; }
+  .path-row { background: var(--surface); padding: 13px 16px; display: flex; align-items: center; gap: 12px; cursor: pointer; border: none; width: 100%; text-align: left; }
+  .path-row:hover, .path-row.active { background: var(--surface-2); }
+  .path-row .title { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .path-row .sc { font-family: var(--mono); font-size: 12.5px; color: var(--ink-faint); }
+
+  .sev { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 7px; border-radius: 20px; font-size: 11px; font-weight: 700; white-space: nowrap; flex: 0 0 auto; }
+  .sev::before { content: ""; width: 6px; height: 6px; border-radius: 50%; }
+  .sev-critical { background: var(--crit-wash); color: var(--crit); } .sev-critical::before { background: var(--crit); }
+  .sev-high { background: var(--high-wash); color: var(--high); } .sev-high::before { background: var(--high); }
+  .sev-medium { background: var(--med-wash); color: var(--med); } .sev-medium::before { background: var(--med); }
+  .sev-low { background: var(--good-wash); color: var(--good); } .sev-low::before { background: var(--good); }
+
+  .dep-panel { margin-top: 20px; }
+  .dep-item { padding: 12px 16px; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+  .dep-item:last-child { border-bottom: none; }
+  .dep-item .pkg { font-family: var(--mono); font-weight: 600; }
+  .dep-item p { margin: 4px 0 0; color: var(--ink-soft); }
+  .dep-empty { padding: 14px 16px; font-size: 12.5px; color: var(--ink-faint); }
+
+  /* ---------- inspector ---------- */
+  .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.35); opacity: 0; pointer-events: none; transition: opacity 180ms ease; z-index: 30; }
+  .scrim.open { opacity: 1; pointer-events: auto; }
+  .inspector { position: fixed; top: 0; right: 0; bottom: 0; width: 380px; max-width: 92vw; background: var(--surface-3); border-left: 1px solid var(--line); box-shadow: -18px 0 40px var(--shadow); transform: translateX(100%); transition: transform 220ms cubic-bezier(.2,.8,.2,1); z-index: 31; display: flex; flex-direction: column; }
+  .inspector.open { transform: translateX(0); }
+  .inspector-head { display: flex; align-items: flex-start; justify-content: space-between; padding: 20px 20px 16px; border-bottom: 1px solid var(--line); gap: 12px; }
+  .inspector-head .kind { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); margin-bottom: 6px; display: block; }
+  .inspector-head h3 { margin: 0; font-size: 16px; font-family: var(--mono); font-weight: 700; word-break: break-word; }
+  .inspector-close { flex: 0 0 auto; width: 28px; height: 28px; border-radius: 6px; border: none; background: transparent; color: var(--ink-faint); cursor: pointer; }
+  .inspector-close:hover { background: var(--surface-2); }
+  .inspector-body { padding: 18px 20px; overflow-y: auto; flex: 1; }
+  .ins-row { margin-bottom: 18px; }
+  .ins-label { font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 6px; }
+  .ins-value { font-size: 13.5px; line-height: 1.55; }
+  .factor { margin-bottom: 12px; font-size: 12.5px; }
+  .factor-top { display: flex; justify-content: space-between; color: var(--ink-soft); margin-bottom: 4px; }
+  .factor-bar { height: 4px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+  .factor-bar > span { display: block; height: 100%; background: var(--ink-faint); }
+  .factor-note { color: var(--ink-faint); margin-top: 3px; }
+  .finding-item { background: var(--surface-2); border-radius: 7px; padding: 10px 12px; margin-bottom: 8px; font-size: 12.5px; }
+  .finding-item a { color: var(--accent); text-decoration: none; font-family: var(--mono); font-weight: 600; }
+  .finding-item p { margin: 4px 0 0; color: var(--ink-soft); }
+
+  /* ---------- toast ---------- */
+  .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(12px); background: var(--surface-3); border: 1px solid var(--line-strong); box-shadow: 0 14px 32px var(--shadow); border-radius: 9px; padding: 11px 18px; font-size: 13px; display: flex; align-items: center; gap: 10px; opacity: 0; pointer-events: none; transition: opacity 180ms ease, transform 180ms ease; z-index: 50; max-width: 480px; }
+  .toast.open { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <svg class="rail-mark" viewBox="0 0 30 30" role="img" aria-label="Reachgraph">
+      <circle cx="7" cy="8" r="2.6" fill="currentColor"/><circle cx="23" cy="8" r="2.6" fill="currentColor"/><circle cx="15" cy="23" r="2.6" fill="currentColor"/>
+      <line x1="9" y1="9.2" x2="21" y2="9.2" stroke="currentColor" stroke-width="1.6"/>
+      <line x1="8" y1="10" x2="14" y2="21" stroke="currentColor" stroke-width="1.6"/>
+      <line x1="22" y1="10" x2="16" y2="21" stroke="currentColor" stroke-width="1.6"/>
+    </svg>
+    <button class="rail-btn active" id="nav-overview" title="Overview">
+      <svg viewBox="0 0 22 22" fill="none"><rect x="3.5" y="3.5" width="15" height="15" rx="3.5" stroke="currentColor" stroke-width="1.6"/><line x1="7" y1="8.5" x2="15" y2="8.5" stroke="currentColor" stroke-width="1.6"/><line x1="7" y1="12" x2="13" y2="12" stroke="currentColor" stroke-width="1.6"/></svg>
+    </button>
+    <button class="rail-btn" id="nav-repos" title="Repositories">
+      <svg viewBox="0 0 22 22" fill="none"><rect x="4" y="5" width="14" height="4.2" rx="1.4" stroke="currentColor" stroke-width="1.6"/><rect x="4" y="10.4" width="14" height="4.2" rx="1.4" stroke="currentColor" stroke-width="1.6"/><rect x="4" y="15.8" width="9" height="2.6" rx="1.2" stroke="currentColor" stroke-width="1.6"/></svg>
+    </button>
+    <div class="rail-spacer"></div>
+    <button class="rail-org" title="Reachgraph">RG</button>
+  </aside>
+
+  <div class="main-col">
+    <header class="topbar">
+      <div class="crumbs">Reachgraph / <span class="current" id="crumb">Overview</span></div>
+      <div class="topbar-spacer"></div>
+      <span class="badge" id="guac-badge"><span class="dot"></span>GUAC persistence</span>
+      <span class="badge" id="gh-badge"><span class="dot"></span>Dependabot token</span>
+    </header>
+
+    <div class="content" id="content">
+
+      <!-- OVERVIEW -->
+      <section class="view view-narrow" id="view-overview">
+        <h1 class="page-title">Scan something real</h1>
+        <p class="page-sub">Every scan below is a live call to api.deps.dev and api.osv.dev — nothing on this page is sample data.</p>
+
+        <div class="tabs">
+          <button class="tab active" id="tab-package">npm package</button>
+          <button class="tab" id="tab-repo">GitHub repository</button>
+        </div>
+
+        <form class="scan-form" id="form-package">
+          <input type="text" id="input-package" placeholder="e.g. express@4.17.0" autocomplete="off" spellcheck="false">
+          <button type="submit" class="btn btn-primary">Scan</button>
+        </form>
+        <form class="scan-form" id="form-repo" style="display:none">
+          <input type="text" id="input-repo" placeholder="owner/repo — e.g. lodash/lodash" autocomplete="off" spellcheck="false">
+          <button type="submit" class="btn btn-primary">Scan repo</button>
+        </form>
+        <p class="hint" id="scan-hint">Resolves the latest published version unless you type one. First scan of a large package can take a few seconds — every lookup is a live network call.</p>
+
+        <div class="status-row" id="status-row"><div class="spinner"></div><span id="status-text">Scanning…</span></div>
+        <div class="error-box" id="error-box"></div>
+
+        <div class="section-label" id="tracked-label" style="display:none">Tracked repositories</div>
+        <div class="repo-grid" id="repo-grid"></div>
+        <div class="empty-note" id="repo-empty" style="display:none">No repositories tracked yet — scan one above. Set <code>GUAC_GRAPHQL_URL</code> to persist scans across restarts.</div>
+      </section>
+
+      <!-- REPOSITORIES -->
+      <section class="view view-narrow" id="view-repos" hidden>
+        <h1 class="page-title">Repositories</h1>
+        <p class="page-sub" id="repos-sub">Read back from GUAC's persistent graph store.</p>
+        <div class="repo-grid" id="repo-grid-2"></div>
+        <div class="empty-note" id="repo-empty-2" style="display:none"></div>
+      </section>
+
+      <!-- RESULT -->
+      <section class="view view-wide" id="view-result" hidden>
+        <button class="btn-ghost" id="back-to-overview" style="margin-bottom:16px">&larr; Back</button>
+
+        <div class="result-head">
+          <div>
+            <h1 id="result-title">&nbsp;</h1>
+            <div class="stat-row" id="result-stats"></div>
+          </div>
+          <div class="score-badge" id="result-score" style="display:none">
+            <div class="num" id="result-score-num">0</div>
+            <div class="lbl">top risk score</div>
+          </div>
+        </div>
+
+        <div class="panel" id="graph-panel">
+          <div class="panel-head"><h2>Dependency graph — flagged paths shown first</h2><button class="btn-ghost" id="graph-refit">Fit</button></div>
+          <div id="graph-canvas"></div>
+          <div class="graph-legend">
+            <span><i style="background:var(--crit)"></i>Critical</span>
+            <span><i style="background:var(--high)"></i>High</span>
+            <span><i style="background:var(--med)"></i>Medium</span>
+            <span><i style="background:var(--accent)"></i>Scan subject</span>
+            <span><i style="background:var(--neutral-node)"></i>Clean / expanded</span>
+          </div>
+          <div class="graph-hint">Click a node for detail. Click a clean node to expand its own direct dependencies from a live deps.dev lookup.</div>
+        </div>
+
+        <div class="result-grid">
+          <div class="panel">
+            <div class="panel-head"><h2>Ranked attack paths</h2></div>
+            <div class="path-list" id="path-list"></div>
+          </div>
+          <div>
+            <div class="panel dep-panel">
+              <div class="panel-head"><h2>GitHub Dependabot alerts</h2></div>
+              <div id="dependabot-body"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<aside class="inspector" id="inspector">
+  <div class="inspector-head">
+    <div><span class="kind" id="ins-kind">Package</span><h3 id="ins-title">&nbsp;</h3></div>
+    <button class="inspector-close" id="inspector-close" aria-label="Close">
+      <svg viewBox="0 0 14 14" fill="none"><line x1="2.5" y1="2.5" x2="11.5" y2="11.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><line x1="11.5" y1="2.5" x2="2.5" y2="11.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+  <div class="inspector-body" id="ins-body"></div>
+</aside>
+
+<div class="toast" id="toast"><span id="toast-text"></span></div>
+
+<script src="/vendor/cytoscape.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
