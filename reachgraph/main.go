@@ -261,6 +261,53 @@ func findAttackPaths(ctx context.Context, osv *osvClient, g *graph) ([]attackPat
 	return paths, directCount, nil
 }
 
+// isDirectDependencyPath reports whether a path's target is a genuine
+// direct dependency of the *scanned repository* — exactly one hop from
+// root. This deliberately does not use Target.Relation: that field is
+// "DIRECT" whenever a node is one hop from whatever subgraph it happened to
+// be resolved in, so a package two hops from the repo (a dependency of one
+// of the repo's own dependencies) can carry "DIRECT" too, inherited from
+// being direct *within its parent's own subgraph*. Real example caught
+// while testing against lodash/lodash: minimist is a dependency of
+// coveralls, not of lodash itself, but showed up labeled DIRECT; checking
+// hop count instead (len(Hops) == 2: root, then target) is what actually
+// answers "did the repository itself declare this."
+func isDirectDependencyPath(p attackPath) bool { return len(p.Hops) == 2 }
+
+// applyReachability is FR3 from the PRD wired into a real scan: for every
+// flagged path whose target is a genuine direct dependency of the
+// repository, check real source files for a real import of it, then
+// re-rank, since a confirmed-unreachable finding can drop below others.
+// Deliberately checked regardless of prod/dev classification — an unused
+// *devDependency* with a CVE (a lint plugin nobody imports, say) is exactly
+// the kind of noise this feature exists to cut through.
+func (s *apiServer) applyReachability(ctx context.Context, owner, repo, ref string, paths []attackPath) []attackPath {
+	var directNames []string
+	seen := map[string]bool{}
+	for _, p := range paths {
+		if isDirectDependencyPath(p) && !seen[p.Target.Name] {
+			seen[p.Target.Name] = true
+			directNames = append(directNames, p.Target.Name)
+		}
+	}
+	if len(directNames) == 0 {
+		return paths
+	}
+
+	findings := s.checkReachability(ctx, owner, repo, ref, directNames)
+	for i, p := range paths {
+		if !isDirectDependencyPath(p) {
+			continue
+		}
+		if rf, ok := findings[p.Target.Name]; ok {
+			paths[i].Score = adjustScoreForCodeReachability(p.Score, rf)
+		}
+	}
+
+	sort.Slice(paths, func(i, j int) bool { return paths[i].Score.Value > paths[j].Score.Value })
+	return paths
+}
+
 type scanRequest struct {
 	Ecosystem string `json:"ecosystem"`
 	Package   string `json:"package"`
@@ -453,6 +500,7 @@ func (s *apiServer) handleScanRepo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	paths = s.applyReachability(ctx, req.Owner, req.Repo, ref, paths)
 
 	sourceNote := "raw.githubusercontent.com + api.deps.dev"
 	if limited {

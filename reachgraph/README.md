@@ -23,7 +23,38 @@ multi-view dashboard — not a single demo page.
 | 1 — persistent graph store (GUAC) | **Done**, optional. See "Phase 1: GUAC" below |
 | 1 — GitHub Dependabot alert cross-check | **Done**, optional (needs `GITHUB_TOKEN`; the happy path with real alert data was not hand-verified in development — no token was available — see caveat below) |
 | 1 — dashboard UI: repositories view, animated graph, inspector | **Done.** See "The dashboard" below |
-| 1 — code reachability, real-time watcher, multi-ecosystem, auth | Not built. Still describes-only, in the implementation plan |
+| 1 — code reachability (FR3) | **Done**, static/lightweight scope. See "Code reachability" below |
+| 1 — real-time watcher, multi-ecosystem, auth | Not built. Still describes-only, in the implementation plan |
+
+## Code reachability
+
+For every flagged path whose target is a genuine one-hop direct dependency
+of the scanned repository (`len(hops) == 2` — see the note on
+`isDirectDependencyPath` in `main.go` for why hop count, not the DIRECT/DEV
+label, is what that has to mean), reachgraph lists the repository's real
+source files via GitHub's git tree API, fetches a bounded set of them, and
+regex-checks each for a real `require(...)`, `import ... from`, or dynamic
+`import(...)` of that exact package name. A confirmed-unreachable finding —
+declared as a dependency, never actually imported — has its score pulled
+down hard and re-ranks below genuinely reachable findings; a confirmed
+import gets real evidence ("imported in lib/x.js") instead of a guess.
+
+This is deliberately the lightweight, static half of FR3 from the PRD, not
+the deep dataflow reachability the implementation plan scopes as a later
+investment — it answers "is this package name referenced anywhere," not
+"does a tainted input actually reach the vulnerable function."
+
+A real bug in the first version of this is worth naming: the initial
+implementation gated the check on `Target.Relation == "DIRECT"`, which
+turned out to mean "direct within whatever subgraph deps.dev resolved this
+node in" — not "direct dependency of the repository." Scanning
+`lodash/lodash` for real surfaced it immediately: `minimist` (an indirect
+dependency, pulled in by `coveralls`, a devDependency) got checked and
+correctly reported as unreachable, while `dojo` — an actual direct
+devDependency of the repository — was silently skipped, because
+devDependencies carry a `DEV` label deps.dev's DIRECT/INDIRECT enum has no
+room for. Switching the gate to hop count fixed both sides of that at once;
+`main_test.go` pins the exact scenario down.
 
 ## The dashboard
 

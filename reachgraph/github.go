@@ -73,6 +73,45 @@ func (c *githubClient) defaultBranch(ctx context.Context, owner, repo string) (s
 	return body.DefaultBranch, nil
 }
 
+// listSourceFiles returns every source-file path in the repository at ref,
+// filtered to import-scannable extensions and pruned of build/vendor
+// output, via one real call to GitHub's git tree API (recursive) — the same
+// endpoint `git ls-tree -r` uses, not a directory-by-directory crawl.
+func (c *githubClient) listSourceFiles(ctx context.Context, owner, repo, ref string) ([]string, error) {
+	treeURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/trees/%s?recursive=1",
+		url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(ref))
+	req, err := c.authedRequest(ctx, http.MethodGet, treeURL)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github tree listing: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github tree listing returned %d for %s/%s@%s", resp.StatusCode, owner, repo, ref)
+	}
+
+	var body struct {
+		Tree []struct {
+			Path string `json:"path"`
+			Type string `json:"type"`
+		} `json:"tree"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("decoding github tree listing: %w", err)
+	}
+
+	var files []string
+	for _, entry := range body.Tree {
+		if entry.Type == "blob" && isCandidateSourceFile(entry.Path) {
+			files = append(files, entry.Path)
+		}
+	}
+	return files, nil
+}
+
 // rawFile fetches one file's raw content at a given ref. Returns ok=false
 // (not an error) if the file simply doesn't exist at that path — a missing
 // lockfile is an expected, common case, not a failure.

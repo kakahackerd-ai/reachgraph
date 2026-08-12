@@ -58,7 +58,21 @@ func reachabilityWeight(depth int) (value int, note string) {
 const (
 	severityWeightPct     = 60
 	reachabilityWeightPct = 40
+	reachabilityLabel     = "Reachability"
 )
+
+func scoreLabel(value int) string {
+	switch {
+	case value >= 85:
+		return "Critical"
+	case value >= 65:
+		return "High"
+	case value >= 40:
+		return "Medium"
+	default:
+		return "Low"
+	}
+}
 
 func computeRiskScore(severity string, depth int) riskScore {
 	sevVal, sevNote := severityWeight(severity)
@@ -69,22 +83,45 @@ func computeRiskScore(severity string, depth int) riskScore {
 		overall = 100
 	}
 
-	label := "Low"
-	switch {
-	case overall >= 85:
-		label = "Critical"
-	case overall >= 65:
-		label = "High"
-	case overall >= 40:
-		label = "Medium"
-	}
-
 	return riskScore{
 		Value: overall,
-		Label: label,
+		Label: scoreLabel(overall),
 		Factors: []scoreFactor{
 			{Label: "Advisory severity", Weight: severityWeightPct, Value: sevVal, Note: sevNote},
-			{Label: "Reachability", Weight: reachabilityWeightPct, Value: reachVal, Note: reachNote},
+			{Label: reachabilityLabel, Weight: reachabilityWeightPct, Value: reachVal, Note: reachNote},
 		},
 	}
+}
+
+// adjustScoreForCodeReachability replaces the hop-based reachability guess
+// with real evidence once it exists (FR3 from the PRD: whether a flagged
+// direct dependency is actually imported by the repository's own code, not
+// just declared). Confirmed imports keep their hop-based value but gain
+// real evidence in the note; confirmed non-imports get pulled down hard —
+// a declared-but-unused dependency's install-time risk still exists, but
+// its runtime-vulnerability risk is real news, not decoration.
+func adjustScoreForCodeReachability(score riskScore, rf reachabilityFinding) riskScore {
+	if !rf.Checked {
+		return score
+	}
+	factors := make([]scoreFactor, len(score.Factors))
+	copy(factors, score.Factors)
+
+	total := 0
+	for i, f := range factors {
+		if f.Label == reachabilityLabel {
+			if rf.Reached {
+				factors[i].Note = "Confirmed: " + rf.Evidence
+			} else {
+				factors[i].Value = 12
+				factors[i].Note = "Confirmed not reachable — " + rf.Evidence
+			}
+		}
+		total += factors[i].Value * factors[i].Weight
+	}
+	overall := total / 100
+	if overall > 100 {
+		overall = 100
+	}
+	return riskScore{Value: overall, Label: scoreLabel(overall), Factors: factors}
 }
