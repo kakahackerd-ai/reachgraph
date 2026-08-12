@@ -186,7 +186,31 @@
     renderGraph(data);
     renderPathList(data.paths || []);
     renderDependabot(data.dependabot);
+    renderTyposquats(data.typosquats);
+    renderSharedMaintainers(data.sharedMaintainers);
     loadRepos('1');
+  }
+
+  function renderTyposquats(findings) {
+    var panel = $('typosquat-panel');
+    if (!findings || !findings.length) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+    $('typosquat-body').innerHTML = findings.map(function (f) {
+      return '<div class="dep-item"><span class="pkg">' + esc(f.package) + '</span>' +
+        ' looks ' + f.distance + ' edit' + (f.distance === 1 ? '' : 's') + ' away from <span class="pkg">' + esc(f.similarTo) + '</span>' +
+        '<p>Worth a manual look before trusting it the way you’d trust ' + esc(f.similarTo) + '.</p></div>';
+    }).join('');
+  }
+
+  function renderSharedMaintainers(findings) {
+    var panel = $('maintainer-panel');
+    if (!findings || !findings.length) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+    $('maintainer-body').innerHTML = findings.map(function (f) {
+      return '<div class="dep-item"><span class="pkg">' + esc(f.package) + '</span> and <span class="pkg">' +
+        esc(f.alsoMaintains.join('</span>, <span class="pkg">')) + '</span></div><p style="padding:0 16px 10px">' +
+        'share maintainer <b>' + esc(f.maintainer) + '</b> on npm.</p>';
+    }).join('');
   }
 
   function renderPathList(paths) {

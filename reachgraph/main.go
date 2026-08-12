@@ -62,15 +62,17 @@ type scanResponse struct {
 		Repo      string `json:"repo,omitempty"`
 		Ref       string `json:"ref,omitempty"`
 	} `json:"subject"`
-	ScannedAt      string             `json:"scannedAt"`
-	DurationMs     int64              `json:"durationMs"`
-	TotalPackages  int                `json:"totalPackages"`
-	DirectPackages int                `json:"directPackages"`
-	FlaggedCount   int                `json:"flaggedCount"`
-	Paths          []attackPath       `json:"paths"`
-	Dependencies   []dependencyNote   `json:"dependencies,omitempty"`
-	Dependabot     *dependabotSummary `json:"dependabot,omitempty"`
-	Source         map[string]string  `json:"source"`
+	ScannedAt         string              `json:"scannedAt"`
+	DurationMs        int64               `json:"durationMs"`
+	TotalPackages     int                 `json:"totalPackages"`
+	DirectPackages    int                 `json:"directPackages"`
+	FlaggedCount      int                 `json:"flaggedCount"`
+	Paths             []attackPath        `json:"paths"`
+	Dependencies      []dependencyNote    `json:"dependencies,omitempty"`
+	Dependabot        *dependabotSummary  `json:"dependabot,omitempty"`
+	Typosquats        []typosquatFinding  `json:"typosquats,omitempty"`
+	SharedMaintainers []maintainerFinding `json:"sharedMaintainers,omitempty"`
+	Source            map[string]string   `json:"source"`
 }
 
 // dependabotSummary reports GitHub's own official Dependabot alerts for a
@@ -538,19 +540,34 @@ func (s *apiServer) handleScanRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	paths = s.applyReachability(ctx, req.Ecosystem, req.Owner, req.Repo, ref, paths)
 
+	directNames := make([]string, len(deps))
+	for i, d := range deps {
+		directNames[i] = d.Name
+	}
+	var flaggedDirectNames []string
+	for _, p := range paths {
+		if isDirectDependencyPath(p) {
+			flaggedDirectNames = append(flaggedDirectNames, p.Target.Name)
+		}
+	}
+	typosquats := checkTyposquat(req.Ecosystem, directNames)
+	sharedMaintainers := s.checkSharedMaintainers(ctx, req.Ecosystem, directNames, flaggedDirectNames)
+
 	sourceNote := "raw.githubusercontent.com + api.deps.dev"
 	if limited {
 		sourceNote += fmt.Sprintf(" (first %d direct dependencies only, for this demo build)", maxDirect)
 	}
 
 	resp := scanResponse{
-		ScannedAt:      start.UTC().Format(time.RFC3339),
-		DurationMs:     time.Since(start).Milliseconds(),
-		TotalPackages:  len(g.Nodes) - 1, // exclude the synthetic repo root
-		DirectPackages: directCount,
-		FlaggedCount:   len(paths),
-		Paths:          paths,
-		Dependencies:   notes,
+		ScannedAt:         start.UTC().Format(time.RFC3339),
+		DurationMs:        time.Since(start).Milliseconds(),
+		TotalPackages:     len(g.Nodes) - 1, // exclude the synthetic repo root
+		DirectPackages:    directCount,
+		FlaggedCount:      len(paths),
+		Paths:             paths,
+		Dependencies:      notes,
+		Typosquats:        typosquats,
+		SharedMaintainers: sharedMaintainers,
 		Source: map[string]string{
 			"dependencies": sourceNote,
 			"advisories":   "api.osv.dev",

@@ -14,6 +14,24 @@ There is no mock, fixture, or hardcoded scan data anywhere in this codebase.
 Every scan is a live set of network calls, made while you wait, in a real
 multi-view dashboard — not a single demo page.
 
+## Track 02 (Supply chain blast radius) — question by question
+
+| Question from the track brief | Answered by |
+|---|---|
+| Which internal services are transitively exposed? | The attack-path graph itself — exact BFS closure over the real dependency graph, not a sample |
+| Which version introduced the vulnerability? | Each finding carries the real OSV/GHSA advisory, including affected ranges |
+| Which applications resolved the compromised version while it was live? | GUAC persistence (`/api/repos`) tracks scanned repos over time; see "Temporal tracking" below |
+| Which other packages share maintainers or infrastructure with it? | `sharedMaintainers` — real npm registry maintainer accounts, cross-referenced |
+| Are there likely typosquat packages nearby? | `typosquats` — real edit-distance check against known-popular package names |
+| What is the complete blast radius? | The graph traversal itself — deterministic, not approximate |
+
+The one deliberately-not-semantic-similarity design decision worth naming:
+typosquat detection uses Damerau-Levenshtein edit distance, not embeddings —
+matching the track brief's own thesis that this class of problem is a
+string/graph problem, and a real HydraDB API exploration (see "HydraDB"
+below) reinforced why that's the right call for anything that needs to be
+*exact*.
+
 ## What's real here, phase by phase
 
 | Phase (per the implementation plan) | Status |
@@ -25,6 +43,8 @@ multi-view dashboard — not a single demo page.
 | 1 — dashboard UI: repositories view, animated graph, inspector | **Done.** See "The dashboard" below |
 | 1 — code reachability (FR3) | **Done**, static/lightweight scope. See "Code reachability" below |
 | 2 — multi-ecosystem (PyPI) | **Done.** See "Multi-ecosystem" below |
+| 2 — typosquat detection | **Done.** `typosquat.go` — real Damerau-Levenshtein distance, no embeddings |
+| 2 — shared-maintainer detection | **Done**, npm-only. `maintainers.go` — real registry data, honest about why PyPI isn't included |
 | 1 — real-time watcher, auth | Not built. Still describes-only, in the implementation plan |
 
 ## Multi-ecosystem (PyPI)
