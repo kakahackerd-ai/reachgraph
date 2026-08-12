@@ -69,6 +69,8 @@
   .scan-form { display: flex; gap: 8px; margin-bottom: 8px; }
   .scan-form input { flex: 1; background: var(--surface); border: 1px solid var(--line-strong); color: var(--ink); border-radius: 8px; padding: 11px 14px; font-size: 14px; font-family: var(--mono); outline: none; }
   .scan-form input:focus { border-color: var(--accent); }
+  .scan-form select { flex: 0 0 auto; background: var(--surface); border: 1px solid var(--line-strong); color: var(--ink); border-radius: 8px; padding: 11px 12px; font-size: 13.5px; font-family: var(--mono); outline: none; cursor: pointer; }
+  .scan-form select:focus { border-color: var(--accent); }
   .btn { border-radius: 8px; padding: 11px 20px; font-size: 14px; font-weight: 700; cursor: pointer; border: 1px solid transparent; }
   .btn-primary { background: var(--accent); color: var(--accent-ink); }
   .btn-primary:hover { filter: brightness(1.08); }
@@ -205,10 +207,18 @@
         </div>
 
         <form class="scan-form" id="form-package">
+          <select id="input-package-ecosystem" aria-label="Ecosystem">
+            <option value="npm">npm</option>
+            <option value="pypi">PyPI</option>
+          </select>
           <input type="text" id="input-package" placeholder="e.g. express@4.17.0" autocomplete="off" spellcheck="false">
           <button type="submit" class="btn btn-primary">Scan</button>
         </form>
         <form class="scan-form" id="form-repo" style="display:none">
+          <select id="input-repo-ecosystem" aria-label="Ecosystem">
+            <option value="npm">npm</option>
+            <option value="pypi">PyPI</option>
+          </select>
           <input type="text" id="input-repo" placeholder="owner/repo — e.g. lodash/lodash" autocomplete="off" spellcheck="false">
           <button type="submit" class="btn btn-primary">Scan repo</button>
         </form>

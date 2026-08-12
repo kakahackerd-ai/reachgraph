@@ -77,7 +77,7 @@ func (c *githubClient) defaultBranch(ctx context.Context, owner, repo string) (s
 // filtered to import-scannable extensions and pruned of build/vendor
 // output, via one real call to GitHub's git tree API (recursive) — the same
 // endpoint `git ls-tree -r` uses, not a directory-by-directory crawl.
-func (c *githubClient) listSourceFiles(ctx context.Context, owner, repo, ref string) ([]string, error) {
+func (c *githubClient) listSourceFiles(ctx context.Context, ecosystem, owner, repo, ref string) ([]string, error) {
 	treeURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/trees/%s?recursive=1",
 		url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(ref))
 	req, err := c.authedRequest(ctx, http.MethodGet, treeURL)
@@ -105,7 +105,7 @@ func (c *githubClient) listSourceFiles(ctx context.Context, owner, repo, ref str
 
 	var files []string
 	for _, entry := range body.Tree {
-		if entry.Type == "blob" && isCandidateSourceFile(entry.Path) {
+		if entry.Type == "blob" && isCandidateSourceFile(ecosystem, entry.Path) {
 			files = append(files, entry.Path)
 		}
 	}
@@ -328,4 +328,98 @@ func (c *githubClient) resolveDirectDependencies(ctx context.Context, owner, rep
 	}
 
 	return extractDependencies(pkg, lock, haveLock), nil
+}
+
+// --- PyPI: requirements.txt ---
+//
+// There is no single dominant PyPI lockfile the way package-lock.json
+// dominates npm — Pipfile.lock and poetry.lock exist but are much less
+// universal, and parsing either is out of scope here. requirements.txt
+// itself is commonly pinned with "==" directly, so parsing it alone still
+// gives real, useful precision without needing a lockfile at all.
+
+var pypiExtrasRe = regexp.MustCompile(`\[[^\]]*\]`)
+var pypiNonAlnumRun = regexp.MustCompile(`[-_.]+`)
+
+// normalizePyPIName applies PEP 503 name normalization (case-insensitive,
+// runs of -_. collapsed to a single -) so "Flask", "flask", and "flask_"
+// all resolve to the same deps.dev/PyPI package.
+func normalizePyPIName(name string) string {
+	return strings.ToLower(pypiNonAlnumRun.ReplaceAllString(name, "-"))
+}
+
+var pypiOperators = []string{"==", ">=", "<=", "~=", "!=", ">", "<"}
+
+// parsePyPISpecifier splits one cleaned requirement line ("requests>=2.25.0")
+// into a name and, when it's an exact "==" pin, a version. Anything looser
+// than an exact pin (a range, or a bare name with no specifier at all) is
+// flagged NeedsLatest, the same honesty pattern extractDependencies uses
+// for unlocked npm ranges.
+func parsePyPISpecifier(spec string) (name, version string, needsLatest bool, note string) {
+	spec = strings.TrimSpace(spec)
+	bestIdx := -1
+	bestOp := ""
+	for _, op := range pypiOperators {
+		if idx := strings.Index(spec, op); idx >= 0 && (bestIdx == -1 || idx < bestIdx) {
+			bestIdx = idx
+			bestOp = op
+		}
+	}
+	if bestIdx == -1 {
+		return strings.TrimSpace(spec), "", true, "no version specifier — resolved against PyPI's current release"
+	}
+	name = strings.TrimSpace(spec[:bestIdx])
+	valuePart := strings.TrimSpace(spec[bestIdx+len(bestOp):])
+	valuePart = strings.TrimSpace(strings.SplitN(valuePart, ",", 2)[0])
+	if bestOp == "==" && valuePart != "" && !strings.Contains(valuePart, "*") {
+		return name, valuePart, false, ""
+	}
+	return name, "", true, "range specifier (" + bestOp + valuePart + ") — resolved against PyPI's current release"
+}
+
+// extractPyPIDependencies is the pure logic behind resolvePyPIDependencies —
+// split out, like extractDependencies, so it's unit-testable without a
+// network round trip.
+func extractPyPIDependencies(content []byte) []resolvedDependency {
+	var deps []resolvedDependency
+	for _, raw := range strings.Split(string(content), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "-") {
+			continue // blank, comment, or an option/flag line (-e, -r, --index-url, ...)
+		}
+		if idx := strings.Index(line, ";"); idx >= 0 { // environment marker
+			line = strings.TrimSpace(line[:idx])
+		}
+		if idx := strings.Index(line, " #"); idx >= 0 { // inline comment
+			line = strings.TrimSpace(line[:idx])
+		}
+		line = pypiExtrasRe.ReplaceAllString(line, "")
+		if line == "" {
+			continue
+		}
+		name, version, needsLatest, note := parsePyPISpecifier(line)
+		if name == "" {
+			continue
+		}
+		deps = append(deps, resolvedDependency{
+			Name:        normalizePyPIName(name),
+			Version:     version,
+			NeedsLatest: needsLatest,
+			RangeNote:   note,
+		})
+	}
+	return deps
+}
+
+// resolvePyPIDependencies reads requirements.txt for owner/repo at ref over
+// the network, then applies extractPyPIDependencies.
+func (c *githubClient) resolvePyPIDependencies(ctx context.Context, owner, repo, ref string) ([]resolvedDependency, error) {
+	content, ok, err := c.rawFile(ctx, owner, repo, ref, "requirements.txt")
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("no requirements.txt at the root of %s/%s@%s — only root-level, requirements.txt-based Python projects are supported in this build", owner, repo, ref)
+	}
+	return extractPyPIDependencies(content), nil
 }

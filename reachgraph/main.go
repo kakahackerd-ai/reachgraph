@@ -175,15 +175,40 @@ func (s *apiServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+var supportedEcosystems = map[string]bool{"npm": true, "pypi": true}
+
+func ecosystemList() []string {
+	return []string{"npm", "pypi"}
+}
+
+func normalizeEcosystem(ecosystem string) string {
+	if ecosystem == "" {
+		return "npm"
+	}
+	return strings.ToLower(ecosystem)
+}
+
+// osvEcosystem maps reachgraph's canonical lowercase ecosystem name (also
+// what deps.dev's URL path expects) to the exact casing OSV.dev's schema
+// requires for that field — verified against the live API before writing
+// this: "npm" for npm, but "PyPI" for Python, not "pypi".
+func osvEcosystem(ecosystem string) string {
+	if strings.EqualFold(ecosystem, "pypi") {
+		return "PyPI"
+	}
+	return "npm"
+}
+
 // findAttackPaths is the shared core behind both scan endpoints: given an
 // already-built graph (whichever way it was built), check every node
 // against OSV.dev and rank the flagged ones into attack paths. Neither
 // caller needs to know the other exists.
 func findAttackPaths(ctx context.Context, osv *osvClient, g *graph) ([]attackPath, int, error) {
+	osvEco := osvEcosystem(g.ecosystem)
 	queries := make([]osvQuery, len(g.Nodes))
 	for i, n := range g.Nodes {
 		queries[i].Package.Name = n.Name
-		queries[i].Package.Ecosystem = "npm"
+		queries[i].Package.Ecosystem = osvEco
 		queries[i].Version = n.Version
 	}
 	batchResults, err := osv.batchQuery(ctx, queries)
@@ -281,7 +306,7 @@ func isDirectDependencyPath(p attackPath) bool { return len(p.Hops) == 2 }
 // Deliberately checked regardless of prod/dev classification — an unused
 // *devDependency* with a CVE (a lint plugin nobody imports, say) is exactly
 // the kind of noise this feature exists to cut through.
-func (s *apiServer) applyReachability(ctx context.Context, owner, repo, ref string, paths []attackPath) []attackPath {
+func (s *apiServer) applyReachability(ctx context.Context, ecosystem, owner, repo, ref string, paths []attackPath) []attackPath {
 	var directNames []string
 	seen := map[string]bool{}
 	for _, p := range paths {
@@ -294,7 +319,7 @@ func (s *apiServer) applyReachability(ctx context.Context, owner, repo, ref stri
 		return paths
 	}
 
-	findings := s.checkReachability(ctx, owner, repo, ref, directNames)
+	findings := s.checkReachability(ctx, ecosystem, owner, repo, ref, directNames)
 	for i, p := range paths {
 		if !isDirectDependencyPath(p) {
 			continue
@@ -329,17 +354,15 @@ func (s *apiServer) handleScan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "\"package\" is required")
 		return
 	}
-	if req.Ecosystem == "" {
-		req.Ecosystem = "npm"
-	}
-	if strings.ToLower(req.Ecosystem) != "npm" {
-		writeError(w, http.StatusBadRequest, "this build only resolves the npm ecosystem — see the implementation plan's multi-ecosystem roadmap")
+	req.Ecosystem = normalizeEcosystem(req.Ecosystem)
+	if !supportedEcosystems[req.Ecosystem] {
+		writeError(w, http.StatusBadRequest, "unsupported ecosystem \""+req.Ecosystem+"\" — this build supports: "+strings.Join(ecosystemList(), ", "))
 		return
 	}
 
 	version := req.Version
 	if version == "" {
-		v, err := s.deps.resolveLatestNpmVersion(ctx, req.Package)
+		v, err := s.deps.resolveLatestVersion(ctx, req.Ecosystem, req.Package)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
@@ -354,7 +377,7 @@ func (s *apiServer) handleScan(w http.ResponseWriter, r *http.Request) {
 	}
 	truncated := truncateDepsDevGraph(dd, 400)
 
-	g := buildGraph(dd)
+	g := buildGraph(dd, req.Ecosystem)
 	paths, directCount, err := findAttackPaths(ctx, s.osv, g)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -383,17 +406,19 @@ func (s *apiServer) handleScan(w http.ResponseWriter, r *http.Request) {
 }
 
 type scanRepoRequest struct {
-	Owner string `json:"owner"`
-	Repo  string `json:"repo"`
-	Ref   string `json:"ref"` // optional; default branch is used when empty
+	Owner     string `json:"owner"`
+	Repo      string `json:"repo"`
+	Ref       string `json:"ref"`       // optional; default branch is used when empty
+	Ecosystem string `json:"ecosystem"` // optional; "npm" (default) or "pypi"
 }
 
 // handleScanRepo is the feature this build adds over the Phase 0 slice:
-// given a GitHub repository, it reads package.json (and package-lock.json,
-// when present) directly from raw.githubusercontent.com, resolves every
-// direct dependency's full transitive graph from deps.dev in parallel,
-// merges them under one synthetic root, and runs the same attack-path
-// ranking a single-package scan uses.
+// given a GitHub repository, it reads the manifest for the requested
+// ecosystem (package.json + package-lock.json for npm, requirements.txt for
+// pypi) directly from raw.githubusercontent.com, resolves every direct
+// dependency's full transitive graph from deps.dev in parallel, merges them
+// under one synthetic root, and runs the same attack-path ranking a
+// single-package scan uses.
 func (s *apiServer) handleScanRepo(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
@@ -410,6 +435,11 @@ func (s *apiServer) handleScanRepo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "\"owner\" and \"repo\" are required")
 		return
 	}
+	req.Ecosystem = normalizeEcosystem(req.Ecosystem)
+	if !supportedEcosystems[req.Ecosystem] {
+		writeError(w, http.StatusBadRequest, "unsupported ecosystem \""+req.Ecosystem+"\" — this build supports: "+strings.Join(ecosystemList(), ", "))
+		return
+	}
 
 	ref := req.Ref
 	if ref == "" {
@@ -421,7 +451,13 @@ func (s *apiServer) handleScanRepo(w http.ResponseWriter, r *http.Request) {
 		ref = branch
 	}
 
-	deps, err := s.github.resolveDirectDependencies(ctx, req.Owner, req.Repo, ref)
+	var deps []resolvedDependency
+	var err error
+	if req.Ecosystem == "pypi" {
+		deps, err = s.github.resolvePyPIDependencies(ctx, req.Owner, req.Repo, ref)
+	} else {
+		deps, err = s.github.resolveDirectDependencies(ctx, req.Owner, req.Repo, ref)
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -456,20 +492,20 @@ func (s *apiServer) handleScanRepo(w http.ResponseWriter, r *http.Request) {
 			defer func() { <-sem }()
 
 			if d.NeedsLatest {
-				v, err := s.deps.resolveLatestNpmVersion(ctx, d.Name)
+				v, err := s.deps.resolveLatestVersion(ctx, req.Ecosystem, d.Name)
 				if err != nil {
 					results[i] = depResult{dep: d, err: err}
 					return
 				}
 				d.Version = v
 			}
-			dg, err := s.deps.dependencyGraph(ctx, "npm", d.Name, d.Version)
+			dg, err := s.deps.dependencyGraph(ctx, req.Ecosystem, d.Name, d.Version)
 			results[i] = depResult{dep: d, graph: dg, err: err}
 		}(i, d)
 	}
 	wg.Wait()
 
-	builder := newGraphBuilder(req.Owner + "/" + req.Repo)
+	builder := newGraphBuilder(req.Owner+"/"+req.Repo, req.Ecosystem)
 	notes := make([]dependencyNote, 0, len(results))
 	nodeBudget := 400
 	for _, res := range results {
@@ -500,7 +536,7 @@ func (s *apiServer) handleScanRepo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	paths = s.applyReachability(ctx, req.Owner, req.Repo, ref, paths)
+	paths = s.applyReachability(ctx, req.Ecosystem, req.Owner, req.Repo, ref, paths)
 
 	sourceNote := "raw.githubusercontent.com + api.deps.dev"
 	if limited {
@@ -524,6 +560,7 @@ func (s *apiServer) handleScanRepo(w http.ResponseWriter, r *http.Request) {
 	resp.Subject.Owner = req.Owner
 	resp.Subject.Repo = req.Repo
 	resp.Subject.Ref = ref
+	resp.Subject.Ecosystem = req.Ecosystem
 	resp.Subject.Name = req.Owner + "/" + req.Repo
 	resp.Dependabot = s.fetchDependabotSummary(ctx, req.Owner, req.Repo)
 
@@ -578,8 +615,10 @@ func (s *apiServer) handleExpand(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
-	if req.Ecosystem == "" {
-		req.Ecosystem = "npm"
+	req.Ecosystem = normalizeEcosystem(req.Ecosystem)
+	if !supportedEcosystems[req.Ecosystem] {
+		writeError(w, http.StatusBadRequest, "unsupported ecosystem \""+req.Ecosystem+"\" — this build supports: "+strings.Join(ecosystemList(), ", "))
+		return
 	}
 	if req.Package == "" || req.Version == "" {
 		writeError(w, http.StatusBadRequest, "\"package\" and \"version\" are required")

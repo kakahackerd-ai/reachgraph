@@ -34,10 +34,26 @@
     $('tab-repo').classList.toggle('active', which === 'repo');
     $('form-package').style.display = which === 'package' ? 'flex' : 'none';
     $('form-repo').style.display = which === 'repo' ? 'flex' : 'none';
-    $('scan-hint').textContent = which === 'package'
-      ? 'Resolves the latest published version unless you type one, e.g. express@4.17.0.'
-      : 'Reads package.json (and package-lock.json, if present) straight from the repository, e.g. lodash/lodash.';
+    updateScanHint();
   }
+
+  function updateScanHint() {
+    var onPackageTab = $('form-package').style.display !== 'none';
+    if (onPackageTab) {
+      var pkgEco = $('input-package-ecosystem').value;
+      $('input-package').placeholder = pkgEco === 'pypi' ? 'e.g. flask==3.0.3' : 'e.g. express@4.17.0';
+      $('scan-hint').textContent = pkgEco === 'pypi'
+        ? 'Resolves the current PyPI release unless you pin one with ==, e.g. flask==3.0.3.'
+        : 'Resolves the latest published version unless you type one, e.g. express@4.17.0.';
+    } else {
+      var repoEco = $('input-repo-ecosystem').value;
+      $('scan-hint').textContent = repoEco === 'pypi'
+        ? 'Reads requirements.txt straight from the repository, e.g. encode/httpx.'
+        : 'Reads package.json (and package-lock.json, if present) straight from the repository, e.g. lodash/lodash.';
+    }
+  }
+  $('input-package-ecosystem').addEventListener('change', updateScanHint);
+  $('input-repo-ecosystem').addEventListener('change', updateScanHint);
 
   // ---- toast ----
   var toastTimer;
@@ -65,13 +81,14 @@
       }
       empty.style.display = 'none';
       if (label) label.style.display = 'block';
-      d.repos.forEach(function (name) {
+      d.repos.forEach(function (repo) {
+        var name = repo.name, ecosystem = repo.ecosystem || 'npm';
         var card = document.createElement('button');
         card.className = 'repo-card';
-        card.innerHTML = '<div class="name">' + esc(name) + '</div><div class="re-scan">Click to re-scan</div>';
+        card.innerHTML = '<div class="name">' + esc(name) + '</div><div class="re-scan">' + esc(ecosystem) + ' &middot; click to re-scan</div>';
         card.addEventListener('click', function () {
           var parts = name.split('/');
-          if (parts.length === 2) runRepoScan(parts[0], parts[1]);
+          if (parts.length === 2) runRepoScan(parts[0], parts[1], ecosystem);
         });
         grid.appendChild(card);
       });
@@ -84,17 +101,23 @@
     e.preventDefault();
     var raw = $('input-package').value.trim();
     if (!raw) return;
+    var ecosystem = $('input-package-ecosystem').value;
     var pkg = raw, version = '';
-    var at = raw.lastIndexOf('@');
-    if (at > 0) { pkg = raw.slice(0, at); version = raw.slice(at + 1); }
-    runPackageScan(pkg, version);
+    if (ecosystem === 'pypi') {
+      var eq = raw.indexOf('==');
+      if (eq > 0) { pkg = raw.slice(0, eq); version = raw.slice(eq + 2); }
+    } else {
+      var at = raw.lastIndexOf('@');
+      if (at > 0) { pkg = raw.slice(0, at); version = raw.slice(at + 1); }
+    }
+    runPackageScan(pkg, version, ecosystem);
   });
   $('form-repo').addEventListener('submit', function (e) {
     e.preventDefault();
     var raw = $('input-repo').value.trim();
     var parts = raw.split('/');
     if (parts.length !== 2 || !parts[0] || !parts[1]) { showStatusError('Enter a repository as owner/repo.'); return; }
-    runRepoScan(parts[0], parts[1]);
+    runRepoScan(parts[0], parts[1], $('input-repo-ecosystem').value);
   });
 
   function setLoading(on, text) {
@@ -108,16 +131,17 @@
     $('status-row').classList.remove('visible');
   }
 
-  function runPackageScan(pkg, version) {
+  function runPackageScan(pkg, version, ecosystem) {
     setLoading(true, 'Resolving ' + pkg + ' from deps.dev…');
-    fetch('/api/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ecosystem: 'npm', package: pkg, version: version }) })
+    fetch('/api/scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ecosystem: ecosystem || 'npm', package: pkg, version: version }) })
       .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
       .then(function (res) { setLoading(false); if (!res.ok) return showStatusError(res.d.error || 'scan failed'); renderResult(res.d); })
       .catch(function (err) { setLoading(false); showStatusError(String(err)); });
   }
-  function runRepoScan(owner, repo) {
+  function runRepoScan(owner, repo, ecosystem) {
+    ecosystem = ecosystem || 'npm';
     setLoading(true, 'Reading ' + owner + '/' + repo + ' from GitHub…');
-    fetch('/api/scan-repo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ owner: owner, repo: repo }) })
+    fetch('/api/scan-repo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ owner: owner, repo: repo, ecosystem: ecosystem }) })
       .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
       .then(function (res) { setLoading(false); if (!res.ok) return showStatusError(res.d.error || 'scan failed'); renderResult(res.d); })
       .catch(function (err) { setLoading(false); showStatusError(String(err)); });
@@ -142,6 +166,7 @@
     $('result-title').textContent = data.subject.name + versionSuffix;
 
     var stats = [];
+    if (data.subject.ecosystem) stats.push('<span><b>' + esc(data.subject.ecosystem) + '</b></span>');
     stats.push('<span><b>' + data.totalPackages + '</b> packages</span>');
     stats.push('<span><b>' + data.directPackages + '</b> direct</span>');
     stats.push('<span><b>' + data.flaggedCount + '</b> flagged</span>');

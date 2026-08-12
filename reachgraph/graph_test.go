@@ -28,7 +28,7 @@ func sampleGraph() *depsDevGraph {
 }
 
 func TestShortestPathToRootIsSingleNode(t *testing.T) {
-	g := buildGraph(sampleGraph())
+	g := buildGraph(sampleGraph(), "npm")
 	path := g.shortestPath(g.rootIndex)
 	if len(path) != 1 || path[0] != g.rootIndex {
 		t.Fatalf("expected root-only path, got %v", path)
@@ -36,7 +36,7 @@ func TestShortestPathToRootIsSingleNode(t *testing.T) {
 }
 
 func TestShortestPathFollowsEdges(t *testing.T) {
-	g := buildGraph(sampleGraph())
+	g := buildGraph(sampleGraph(), "npm")
 	path := g.shortestPath(3)
 	want := []int{0, 1, 2, 3}
 	if len(path) != len(want) {
@@ -53,7 +53,7 @@ func TestShortestPathUnreachableReturnsNil(t *testing.T) {
 	dd := sampleGraph()
 	// node 5 exists but has no incoming edge from anywhere reachable
 	dd.Nodes = append(dd.Nodes, depsDevNode{Relation: "INDIRECT"})
-	g := buildGraph(dd)
+	g := buildGraph(dd, "npm")
 	if path := g.shortestPath(5); path != nil {
 		t.Fatalf("expected nil for unreachable node, got %v", path)
 	}
@@ -74,7 +74,7 @@ func TestShortestPathPrefersFewerHops(t *testing.T) {
 			{FromNode: 0, ToNode: 2},
 		},
 	}
-	g := buildGraph(dd)
+	g := buildGraph(dd, "npm")
 	path := g.shortestPath(2)
 	if len(path) != 2 {
 		t.Fatalf("expected the 2-hop direct path (BFS shortest), got %v", path)

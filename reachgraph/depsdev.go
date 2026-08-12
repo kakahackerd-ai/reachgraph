@@ -79,6 +79,48 @@ func (c *depsDevClient) resolveLatestNpmVersion(ctx context.Context, name string
 	return body.Version, nil
 }
 
+// resolveLatestPyPIVersion asks PyPI's own JSON API for a project's current
+// release — verified against the live API (https://pypi.org/pypi/{name}/json,
+// info.version) before writing this, the same pattern as the npm resolver.
+func (c *depsDevClient) resolveLatestPyPIVersion(ctx context.Context, name string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		"https://pypi.org/pypi/"+url.PathEscape(name)+"/json", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("pypi registry: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("package %q not found on PyPI", name)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("pypi registry returned %d for %q", resp.StatusCode, name)
+	}
+	var body struct {
+		Info struct {
+			Version string `json:"version"`
+		} `json:"info"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", fmt.Errorf("decoding pypi registry response: %w", err)
+	}
+	if body.Info.Version == "" {
+		return "", fmt.Errorf("pypi registry did not return a version for %q", name)
+	}
+	return body.Info.Version, nil
+}
+
+// resolveLatestVersion dispatches to the right registry for the ecosystem.
+func (c *depsDevClient) resolveLatestVersion(ctx context.Context, ecosystem, name string) (string, error) {
+	if strings.EqualFold(ecosystem, "pypi") {
+		return c.resolveLatestPyPIVersion(ctx, name)
+	}
+	return c.resolveLatestNpmVersion(ctx, name)
+}
+
 // dependencyGraph calls the live deps.dev API and returns the fully resolved
 // transitive dependency graph for one package version. No caching, no mock
 // fixtures — every call hits api.deps.dev.

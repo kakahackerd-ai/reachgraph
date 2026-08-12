@@ -24,7 +24,39 @@ multi-view dashboard — not a single demo page.
 | 1 — GitHub Dependabot alert cross-check | **Done**, optional (needs `GITHUB_TOKEN`; the happy path with real alert data was not hand-verified in development — no token was available — see caveat below) |
 | 1 — dashboard UI: repositories view, animated graph, inspector | **Done.** See "The dashboard" below |
 | 1 — code reachability (FR3) | **Done**, static/lightweight scope. See "Code reachability" below |
-| 1 — real-time watcher, multi-ecosystem, auth | Not built. Still describes-only, in the implementation plan |
+| 2 — multi-ecosystem (PyPI) | **Done.** See "Multi-ecosystem" below |
+| 1 — real-time watcher, auth | Not built. Still describes-only, in the implementation plan |
+
+## Multi-ecosystem (PyPI)
+
+`ecosystem: "pypi"` is a real, first-class second ecosystem, not a stub:
+`POST /api/scan` resolves any PyPI package version from deps.dev, and
+`POST /api/scan-repo` reads `requirements.txt` (there's no single dominant
+PyPI lockfile the way `package-lock.json` dominates npm, so this parses the
+manifest directly — most real-world `requirements.txt` files pin with `==`
+anyway, which still gives real precision without one). Code reachability
+switches to Python's own `import x` / `from x import y` patterns and skips
+`venv`/`.venv`/`site-packages`/`__pycache__` instead of `node_modules`/`dist`.
+Verified against `encode/httpx`'s real `requirements.txt` (which also has a
+`-e .[extras]` editable-install line the parser correctly skips): real CVEs
+found, and reachability correctly confirmed `cryptography` and `pytest` as
+imported in the repo's own test files.
+
+One honest, named limitation: reachability matching compares the PyPI
+distribution name against the Python import name, and those differ for a
+few well-known packages (`beautifulsoup4` imports as `bs4`, `PyYAML` imports
+as `yaml`). Closing that needs a name-mapping data source this build doesn't
+have. The failure mode is under-reporting reachability for those specific
+packages, not over-reporting it — the safer direction for a risk signal to
+be wrong in.
+
+A second real bug, caught by the dashboard's own end-to-end test once both
+ecosystems were in play at once: `/api/repos` originally had no way to
+remember which ecosystem a tracked repository was scanned under, so
+re-scanning a tracked PyPI repo from its card silently defaulted to npm and
+failed outright. Fixed by tagging the synthetic repository root with a real
+GUAC pURL qualifier (`ecosystem=pypi`) at ingest time and reading it back in
+`listScannedSubjects` — see `pkgInputQualified` in `guac.go`.
 
 ## Code reachability
 

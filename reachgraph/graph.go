@@ -18,13 +18,20 @@ type graph struct {
 	// adjacency: node index -> indices it directly depends on
 	adjacency map[int][]int
 	rootIndex int
+	// ecosystem is the canonical lowercase ecosystem this whole graph was
+	// resolved in ("npm", "pypi"). A single scan resolves every node from
+	// one deps.dev `system`, so one field for the whole graph is correct —
+	// this is what findAttackPaths uses to query OSV with the right
+	// ecosystem string instead of assuming npm.
+	ecosystem string
 }
 
-func buildGraph(dd *depsDevGraph) *graph {
+func buildGraph(dd *depsDevGraph, ecosystem string) *graph {
 	g := &graph{
 		Nodes:     make([]graphNode, len(dd.Nodes)),
 		adjacency: make(map[int][]int, len(dd.Nodes)),
 		rootIndex: -1,
+		ecosystem: ecosystem,
 	}
 	for i, n := range dd.Nodes {
 		g.Nodes[i] = graphNode{
@@ -55,10 +62,11 @@ type graphBuilder struct {
 	indexOf map[string]int // "name@version" -> node index
 }
 
-func newGraphBuilder(rootName string) *graphBuilder {
+func newGraphBuilder(rootName, ecosystem string) *graphBuilder {
 	g := &graph{
 		adjacency: make(map[int][]int),
 		rootIndex: 0,
+		ecosystem: ecosystem,
 	}
 	g.Nodes = append(g.Nodes, graphNode{Index: 0, Name: rootName, Relation: "ROOT"})
 	return &graphBuilder{g: g, indexOf: map[string]int{"\x00root": 0}}

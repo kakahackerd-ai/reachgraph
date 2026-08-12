@@ -81,6 +81,25 @@ func pkgInput(pkgType, name, version string) map[string]any {
 	return map[string]any{"packageInput": in}
 }
 
+// pkgInputQualified attaches pURL qualifiers (GUAC's PackageQualifierInputSpec)
+// to a package input. Used to tag the synthetic repository root with which
+// ecosystem it was scanned as — GUAC's own DIRECT/INDIRECT dependency labels
+// don't carry that, and without it, re-scanning a tracked repository from
+// the dashboard has no way to know whether to call deps.dev with "npm" or
+// "pypi" (a real gap this closes, not a hypothetical one: it broke a repo
+// re-scan for real once npm and PyPI repos coexisted in one tracked list).
+func pkgInputQualified(pkgType, name, version string, qualifiers map[string]string) map[string]any {
+	in := pkgInput(pkgType, name, version)["packageInput"].(map[string]any)
+	if len(qualifiers) > 0 {
+		var q []map[string]string
+		for k, v := range qualifiers {
+			q = append(q, map[string]string{"key": k, "value": v})
+		}
+		in["qualifiers"] = q
+	}
+	return map[string]any{"packageInput": in}
+}
+
 const bulkIngestPackagesQuery = `
 mutation IngestPackages($pkgs: [IDorPkgInput!]!) {
   ingestPackages(pkgs: $pkgs) { packageVersionID }
@@ -190,9 +209,24 @@ func (c *guacClient) ingestCertifyVulns(ctx context.Context, certs []certifyVuln
 const listGuacSubjectsQuery = `
 query ListSubjects($pkgSpec: PkgSpec!) {
   packages(pkgSpec: $pkgSpec) {
-    namespaces { names { name versions { version } } }
+    namespaces {
+      names {
+        name
+        versions { qualifiers { key value } }
+      }
+    }
   }
 }`
+
+// trackedRepo is one previously-scanned repository read back from GUAC,
+// including which ecosystem it was scanned as — read from the "ecosystem"
+// qualifier pkgInputForNode wrote onto the root package at ingest time, so
+// re-scanning it from the dashboard calls deps.dev with the right system
+// instead of assuming npm.
+type trackedRepo struct {
+	Name      string `json:"name"`
+	Ecosystem string `json:"ecosystem"`
+}
 
 // listScannedSubjects returns every previously-ingested repository — pURL
 // type "guac" is the synthetic root graphBuilder gives a repo scan (see
@@ -200,12 +234,18 @@ query ListSubjects($pkgSpec: PkgSpec!) {
 // from "this showed up somewhere as a transitive dependency." Filtering by
 // that type, rather than querying every package in the graph, is what makes
 // this a tracked-repositories list instead of a dump of the whole store.
-func (c *guacClient) listScannedSubjects(ctx context.Context) ([]string, error) {
+func (c *guacClient) listScannedSubjects(ctx context.Context) ([]trackedRepo, error) {
 	var out struct {
 		Packages []struct {
 			Namespaces []struct {
 				Names []struct {
-					Name string `json:"name"`
+					Name     string `json:"name"`
+					Versions []struct {
+						Qualifiers []struct {
+							Key   string `json:"key"`
+							Value string `json:"value"`
+						} `json:"qualifiers"`
+					} `json:"versions"`
 				} `json:"names"`
 			} `json:"namespaces"`
 		} `json:"packages"`
@@ -214,15 +254,24 @@ func (c *guacClient) listScannedSubjects(ctx context.Context) ([]string, error) 
 	if err := c.do(ctx, listGuacSubjectsQuery, map[string]any{"pkgSpec": spec}, &out); err != nil {
 		return nil, err
 	}
-	var subjects []string
+	var subjects []trackedRepo
 	seen := map[string]bool{}
 	for _, ns := range out.Packages {
 		for _, n := range ns.Namespaces {
 			for _, name := range n.Names {
-				if !seen[name.Name] {
-					seen[name.Name] = true
-					subjects = append(subjects, name.Name)
+				if seen[name.Name] {
+					continue
 				}
+				seen[name.Name] = true
+				eco := "npm" // default for repos ingested before this qualifier existed
+				for _, v := range name.Versions {
+					for _, q := range v.Qualifiers {
+						if q.Key == "ecosystem" && q.Value != "" {
+							eco = q.Value
+						}
+					}
+				}
+				subjects = append(subjects, trackedRepo{Name: name.Name, Ecosystem: eco})
 			}
 		}
 	}
@@ -270,18 +319,31 @@ func (s *apiServer) persistToGUAC(ctx context.Context, subjectName string, g *gr
 	}()
 }
 
-func nodePkgType(n graphNode) string {
+func nodePkgType(n graphNode, ecosystem string) string {
 	if n.Relation == "ROOT" {
 		return "guac"
 	}
-	return "npm"
+	if ecosystem == "" {
+		return "npm"
+	}
+	return ecosystem
+}
+
+// pkgInputForNode builds a package input for one graph node, tagging the
+// synthetic repository root with an "ecosystem" qualifier so it can be read
+// back later — see pkgInputQualified for why that round trip matters.
+func pkgInputForNode(n graphNode, ecosystem string) map[string]any {
+	if n.Relation == "ROOT" {
+		return pkgInputQualified("guac", n.Name, n.Version, map[string]string{"ecosystem": ecosystem})
+	}
+	return pkgInput(nodePkgType(n, ecosystem), n.Name, n.Version)
 }
 
 func (s *apiServer) doPersistToGUAC(ctx context.Context, g *graph, paths []attackPath) error {
 	// 1. Every node becomes a package in the trie.
 	pkgs := make([]map[string]any, len(g.Nodes))
 	for i, n := range g.Nodes {
-		pkgs[i] = pkgInput(nodePkgType(n), n.Name, n.Version)
+		pkgs[i] = pkgInputForNode(n, g.ecosystem)
 	}
 	for _, group := range chunk(pkgs, 200) {
 		if err := s.guac.ingestPackages(ctx, group); err != nil {
@@ -298,8 +360,8 @@ func (s *apiServer) doPersistToGUAC(ctx context.Context, g *graph, paths []attac
 				note = "development dependency, resolved via deps.dev"
 			}
 			edges = append(edges, dependencyEdgeInput{
-				Pkg:    pkgInput(nodePkgType(g.Nodes[from]), g.Nodes[from].Name, g.Nodes[from].Version),
-				DepPkg: pkgInput(nodePkgType(g.Nodes[to]), g.Nodes[to].Name, g.Nodes[to].Version),
+				Pkg:    pkgInputForNode(g.Nodes[from], g.ecosystem),
+				DepPkg: pkgInputForNode(g.Nodes[to], g.ecosystem),
 				Type:   dependencyType(g.Nodes[to].Relation),
 				Note:   note,
 			})
@@ -321,7 +383,7 @@ func (s *apiServer) doPersistToGUAC(ctx context.Context, g *graph, paths []attac
 	var certs []certifyVulnInput
 	now := time.Now()
 	for _, p := range paths {
-		pkg := pkgInput("npm", p.Target.Name, p.Target.Version)
+		pkg := pkgInput(nodePkgType(graphNode{Relation: p.Target.Relation}, g.ecosystem), p.Target.Name, p.Target.Version)
 		for _, f := range p.Findings {
 			if !seenVulnIDs[f.ID] {
 				seenVulnIDs[f.ID] = true

@@ -43,7 +43,7 @@ func TestApplyReachabilitySkipsWhenNoDirectPathsFlagged(t *testing.T) {
 		Target: pathHop{Name: "b", Relation: "INDIRECT"},
 		Score:  riskScore{Value: 50, Label: "Medium"},
 	}}
-	got := s.applyReachability(nil, "o", "r", "main", paths)
+	got := s.applyReachability(nil, "npm", "o", "r", "main", paths)
 	if got[0].Score.Value != 50 {
 		t.Fatalf("expected untouched score when nothing is a direct dependency path, got %d", got[0].Score.Value)
 	}

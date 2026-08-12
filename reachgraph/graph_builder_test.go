@@ -10,7 +10,7 @@ import "testing"
 //	repo -> A -> S
 //	repo -> B -> S
 func TestGraphBuilderDedupesSharedTransitiveDependency(t *testing.T) {
-	b := newGraphBuilder("acme/widgets")
+	b := newGraphBuilder("acme/widgets", "npm")
 
 	depA := &depsDevGraph{
 		Nodes: []depsDevNode{
@@ -57,7 +57,7 @@ func TestGraphBuilderDedupesSharedTransitiveDependency(t *testing.T) {
 }
 
 func TestGraphBuilderRootWiredToEachDirectDependency(t *testing.T) {
-	b := newGraphBuilder("acme/widgets")
+	b := newGraphBuilder("acme/widgets", "npm")
 	dep := &depsDevGraph{
 		Nodes: []depsDevNode{{Relation: "SELF"}},
 	}
