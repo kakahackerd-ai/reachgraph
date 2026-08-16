@@ -221,9 +221,21 @@ func (c *hydraDBClient) ingestFacts(ctx context.Context, collection string, fact
 // pending source, rather than one request per id — the earlier version of
 // this client polled each id in its own sequential loop, which meant a
 // slow first id could starve every id after it of most of the deadline).
+// collection must match what the ids were ingested into (or be "" for the
+// default collection) — live testing found that /context/status, like
+// /context/delete, scopes id lookups by collection: omitting it for a
+// collection-scoped id (every code-graph fact) doesn't error, it just
+// answers "ID not found" (indexing_status "errored") for every poll until
+// the context deadline, which looks indistinguishable from a real timeout
+// unless you go looking. That's also why "errored" is treated as terminal
+// below alongside "completed"/"failed": it's not in the OpenAPI status
+// enum (which lists only queued/processing/completed/failed), but it's a
+// real value the live API returns, and — whether it means "wrong scope"
+// or a genuine indexing error — it will never become "completed" either
+// way, so there's nothing to gain by continuing to poll it.
 // Best-effort: a slow or failed index doesn't panic the caller, it just
 // stops waiting.
-func (c *hydraDBClient) waitForIndexing(ctx context.Context, ids []string) {
+func (c *hydraDBClient) waitForIndexing(ctx context.Context, collection string, ids []string) {
 	if len(ids) == 0 {
 		return
 	}
@@ -239,6 +251,9 @@ func (c *hydraDBClient) waitForIndexing(ctx context.Context, ids []string) {
 		}
 
 		q := url.Values{"database": {c.database}}
+		if collection != "" {
+			q.Set("collection", collection)
+		}
 		for id := range pending {
 			q.Add("ids", id)
 		}
@@ -261,7 +276,7 @@ func (c *hydraDBClient) waitForIndexing(ctx context.Context, ids []string) {
 		_ = json.NewDecoder(resp.Body).Decode(&body)
 		resp.Body.Close()
 		for _, s := range body.Data.Statuses {
-			if s.IndexingStatus == "completed" || s.IndexingStatus == "failed" {
+			if s.IndexingStatus == "completed" || s.IndexingStatus == "failed" || s.IndexingStatus == "errored" {
 				delete(pending, s.ID)
 			}
 		}
@@ -314,6 +329,25 @@ type hydraQueryOptions struct {
 	MetadataFilters map[string]any
 	SourceIDs       []string
 	MaxResults      int
+}
+
+// hydraRawRelationGroup is the wire shape shared by graph_context's
+// query_paths and chunk_relations arrays.
+type hydraRawRelationGroup struct {
+	Triplets []struct {
+		Source struct {
+			Name string `json:"name"`
+		} `json:"source"`
+		Relation struct {
+			CanonicalPredicate string `json:"canonical_predicate"`
+			Context            string `json:"context"`
+		} `json:"relation"`
+		Target struct {
+			Name string `json:"name"`
+		} `json:"target"`
+	} `json:"triplets"`
+	RelevancyScore  float64 `json:"relevancy_score"`
+	CombinedContext string  `json:"combined_context"`
 }
 
 // query asks a natural-language question and returns the graph paths
@@ -369,22 +403,17 @@ func (c *hydraDBClient) query(ctx context.Context, question string, opts hydraQu
 				Title string `json:"title"`
 			} `json:"sources"`
 			GraphContext struct {
-				QueryPaths []struct {
-					Triplets []struct {
-						Source struct {
-							Name string `json:"name"`
-						} `json:"source"`
-						Relation struct {
-							CanonicalPredicate string `json:"canonical_predicate"`
-							Context            string `json:"context"`
-						} `json:"relation"`
-						Target struct {
-							Name string `json:"name"`
-						} `json:"target"`
-					} `json:"triplets"`
-					RelevancyScore  float64 `json:"relevancy_score"`
-					CombinedContext string  `json:"combined_context"`
-				} `json:"query_paths"`
+				// QueryPaths and ChunkRelations share the same
+				// {triplets, relevancy_score, combined_context} shape.
+				// Live testing against a real key found QueryPaths coming
+				// back empty ([]) for a straightforward question while
+				// ChunkRelations carried real, correctly-extracted triplets
+				// for the exact same query — so both are parsed and
+				// merged below rather than trusting QueryPaths alone the
+				// way the OpenAPI doc's naming ("query_paths" sounds like
+				// *the* answer) would suggest.
+				QueryPaths     []hydraRawRelationGroup `json:"query_paths"`
+				ChunkRelations []hydraRawRelationGroup `json:"chunk_relations"`
 			} `json:"graph_context"`
 		} `json:"data"`
 		Meta struct {
@@ -407,27 +436,50 @@ func (c *hydraDBClient) query(ctx context.Context, question string, opts hydraQu
 
 	result := &hydraQueryResult{RequestID: parsed.Meta.RequestID}
 	bestScore := -1.0
-	for _, p := range parsed.Data.GraphContext.QueryPaths {
-		if p.RelevancyScore > bestScore {
-			bestScore = p.RelevancyScore
-			result.Answer = p.CombinedContext
-		}
-		for _, t := range p.Triplets {
-			result.Triplets = append(result.Triplets, hydraTriplet{
-				Source: t.Source.Name, Relation: t.Relation.CanonicalPredicate, Target: t.Target.Name,
-				Context: t.Relation.Context, RelevancyScore: p.RelevancyScore,
-			})
+	for _, groups := range [][]hydraRawRelationGroup{parsed.Data.GraphContext.QueryPaths, parsed.Data.GraphContext.ChunkRelations} {
+		for _, p := range groups {
+			if p.CombinedContext != "" && p.RelevancyScore > bestScore {
+				bestScore = p.RelevancyScore
+				result.Answer = p.CombinedContext
+			}
+			for _, t := range p.Triplets {
+				result.Triplets = append(result.Triplets, hydraTriplet{
+					Source: t.Source.Name, Relation: t.Relation.CanonicalPredicate, Target: t.Target.Name,
+					Context: t.Relation.Context, RelevancyScore: p.RelevancyScore,
+				})
+			}
 		}
 	}
 	for _, ch := range parsed.Data.Chunks {
 		result.Chunks = append(result.Chunks, hydraChunk{
-			SourceTitle: ch.SourceTitle, Content: ch.ChunkContent, RelevancyScore: ch.RelevancyScore,
+			SourceTitle: ch.SourceTitle, Content: extractChunkText(ch.ChunkContent), RelevancyScore: ch.RelevancyScore,
 		})
 	}
 	for _, s := range parsed.Data.Sources {
 		result.Sources = append(result.Sources, hydraSourceRef{ID: s.ID, Title: s.Title})
 	}
 	return result, nil
+}
+
+// extractChunkText unwraps the plain sentence out of a chunk's raw content.
+// Live testing found that for a "knowledge" source ingested via
+// app_knowledge (this client's own ingestFacts path), chunk_content isn't
+// the plain text — it's the entire underlying source document serialized
+// as a JSON string, e.g. {"id":"...","content":{"text":"At 2026-...
+// resolved dependency..."},"document_metadata":{...},...}. This pulls just
+// content.text back out for display; if the string isn't that shape (a
+// different ingestion path, e.g. a real uploaded file, may return plain
+// text directly per the OpenAPI examples), it's returned unchanged.
+func extractChunkText(raw string) string {
+	var doc struct {
+		Content struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(raw), &doc); err == nil && doc.Content.Text != "" {
+		return doc.Content.Text
+	}
+	return raw
 }
 
 // listSourceIDs returns every knowledge-source id in the given collection
@@ -439,12 +491,47 @@ func (c *hydraDBClient) query(ctx context.Context, question string, opts hydraQu
 // entries found, which the caller treats as "nothing to clean up," not an
 // error.
 func (c *hydraDBClient) listSourceIDs(ctx context.Context, collection string) ([]string, error) {
+	sources, err := c.listSources(ctx, collection)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(sources))
+	for i, s := range sources {
+		ids[i] = s.ID
+	}
+	return ids, nil
+}
+
+type hydraListedSource struct {
+	ID                 string
+	Title              string
+	AdditionalMetadata map[string]any
+}
+
+// listSources returns every knowledge source in the given collection (the
+// database's default collection if collection is ""), with title and
+// additional_metadata — used by listSourceIDs above for code-graph
+// cleanup, and directly by the tracked-repository listing in reposdb.go,
+// which needs the metadata (ecosystem) back, not just ids. Confirmed live
+// that "sources" comes back flattened directly under data, not wrapped
+// (see the package doc comment on why that was worth confirming).
+func (c *hydraDBClient) listSources(ctx context.Context, collection string) ([]hydraListedSource, error) {
 	payload := map[string]any{
-		"database":       c.database,
-		"type":           "knowledge",
-		"page":           1,
-		"page_size":      200,
-		"include_fields": []string{"id"},
+		"database": c.database,
+		"type":     "knowledge",
+		"page":     1,
+		// 100 is the real API's actual maximum — confirmed live, since the
+		// OpenAPI doc's page_size field carries no documented upper bound.
+		// maxCodeGraphFiles (60) keeps a single repo's code-graph facts
+		// well under this, so one page is enough for listSourceIDs'
+		// stale-cleanup use case; this isn't a general-purpose paginated
+		// listing.
+		"page_size": 100,
+		// No include_fields: confirmed live that the API rejects
+		// `["id"]` ("invalid include_fields: id") even though the
+		// OpenAPI example shows exactly that — id is already always
+		// returned per the field's own description ("plus id, database,
+		// collection are returned"), so there's nothing to project.
 	}
 	if collection != "" {
 		payload["collection"] = collection
@@ -482,43 +569,77 @@ func (c *hydraDBClient) listSourceIDs(ctx context.Context, collection string) ([
 		}
 		return nil, fmt.Errorf("hydradb list rejected: %s", msg)
 	}
-	ids := make([]string, 0, len(parsed.Data.Sources))
+	sources := make([]hydraListedSource, 0, len(parsed.Data.Sources))
 	for _, src := range parsed.Data.Sources {
-		if id, ok := src["id"].(string); ok && id != "" {
-			ids = append(ids, id)
+		id, _ := src["id"].(string)
+		if id == "" {
+			continue
 		}
+		title, _ := src["title"].(string)
+		meta, _ := src["additional_metadata"].(map[string]any)
+		sources = append(sources, hydraListedSource{ID: id, Title: title, AdditionalMetadata: meta})
 	}
-	return ids, nil
+	return sources, nil
 }
 
-// deleteSources deletes knowledge sources by id. Used to clear a
-// repository's stale code-graph facts before re-ingesting current ones.
-func (c *hydraDBClient) deleteSources(ctx context.Context, ids []string) error {
+// deleteSources deletes knowledge sources by id, scoped to collection (must
+// match the collection the ids were ingested into — live testing found
+// that omitting it makes the API silently match nothing and still answer
+// 200/success, per its own documented "legacy" delete-status default,
+// which is exactly the kind of no-op a caller could mistake for a real
+// delete). Requests strict status codes and returns the real deleted
+// count instead of trusting a 200 alone, so a caller can tell "deleted N
+// of M" from "deleted nothing."
+func (c *hydraDBClient) deleteSources(ctx context.Context, collection string, ids []string) (int, error) {
 	if len(ids) == 0 {
-		return nil
+		return 0, nil
 	}
 	payload := map[string]any{
 		"database": c.database,
 		"ids":      ids,
 		"type":     "knowledge",
 	}
+	if collection != "" {
+		payload["collection"] = collection
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	req, err := c.authedRequest(ctx, http.MethodDelete, c.base+"/context", bytes.NewBuffer(body), "application/json")
 	if err != nil {
-		return err
+		return 0, err
 	}
+	req.Header.Set("X-HydraDB-Delete-Status", "strict")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("hydradb delete: %w", err)
+		return 0, fmt.Errorf("hydradb delete: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("hydradb delete: unexpected status %d", resp.StatusCode)
+
+	var parsed struct {
+		Success bool `json:"success"`
+		Data    struct {
+			DeletedCount int `json:"deleted_count"`
+		} `json:"data"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
 	}
-	return nil
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return 0, fmt.Errorf("decoding hydradb delete response (status %d): %w", resp.StatusCode, err)
+	}
+	if resp.StatusCode >= 400 && resp.StatusCode != 404 {
+		// 404 in strict mode just means "nothing matched" — not a failure
+		// worth erroring the caller over, since the sources may simply
+		// have expired or already been deleted.
+		msg := "unknown error"
+		if parsed.Error != nil {
+			msg = parsed.Error.Message
+		}
+		return parsed.Data.DeletedCount, fmt.Errorf("hydradb delete: status %d: %s", resp.StatusCode, msg)
+	}
+	return parsed.Data.DeletedCount, nil
 }
 
 type hydraRelation struct {

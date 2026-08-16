@@ -101,7 +101,12 @@ func (s *apiServer) indexCodeGraph(ctx context.Context, ecosystem, owner, repo, 
 		return
 	}
 	go func() {
-		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 120*time.Second)
+		// 240s: this goroutine does list+delete+ingest *and then* waits
+		// for indexing, and live testing found a 23-file batch alone
+		// taking ~120s to finish indexing — the original 120s total
+		// budget left waitForIndexing racing the clock. Fire-and-forget,
+		// so the longer budget costs nothing.
+		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 240*time.Second)
 		defer cancel()
 
 		files, err := s.github.listSourceFiles(bgCtx, ecosystem, owner, repo, ref)
@@ -165,8 +170,11 @@ func (s *apiServer) indexCodeGraph(ctx context.Context, ecosystem, owner, repo, 
 		if staleIDs, err := s.hydra.listSourceIDs(bgCtx, collection); err != nil {
 			log.Printf("code graph: listing existing sources failed for %s (continuing without cleanup): %v", repoLabel, err)
 		} else if len(staleIDs) > 0 {
-			if err := s.hydra.deleteSources(bgCtx, staleIDs); err != nil {
-				log.Printf("code graph: deleting %d stale source(s) failed for %s (continuing): %v", len(staleIDs), repoLabel, err)
+			deleted, err := s.hydra.deleteSources(bgCtx, collection, staleIDs)
+			if err != nil {
+				log.Printf("code graph: deleting stale sources failed for %s (deleted %d/%d, continuing): %v", repoLabel, deleted, len(staleIDs), err)
+			} else {
+				log.Printf("code graph: deleted %d/%d stale source(s) for %s", deleted, len(staleIDs), repoLabel)
 			}
 		}
 
@@ -176,7 +184,7 @@ func (s *apiServer) indexCodeGraph(ctx context.Context, ecosystem, owner, repo, 
 			return
 		}
 		log.Printf("code graph: indexed %d file(s) into hydradb collection %q for %s, waiting for indexing", len(ids), collection, repoLabel)
-		s.hydra.waitForIndexing(bgCtx, ids)
+		s.hydra.waitForIndexing(bgCtx, collection, ids)
 		log.Printf("code graph: finished indexing for %s", repoLabel)
 	}()
 }

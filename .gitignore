@@ -1,5 +1,9 @@
 # Local Claude Code settings (machine-specific, not shared)
 .claude/settings.local.json
 
+# Local secrets / API keys — never committed
+.env
+.env.*
+
 # Editor/OS cruft
 .DS_Store

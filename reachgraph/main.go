@@ -723,11 +723,28 @@ func (s *apiServer) handleScanRepo(w http.ResponseWriter, r *http.Request) {
 	s.persistToGUAC(context.WithoutCancel(ctx), resp.Subject.Name, g, paths)
 	s.persistTimelineFacts(ctx, "repository", resp.Subject.Name, req.Ecosystem, start, paths)
 	s.indexCodeGraph(context.WithoutCancel(ctx), req.Ecosystem, req.Owner, req.Repo, ref)
+	s.persistTrackedRepo(context.WithoutCancel(ctx), resp.Subject.Name, req.Ecosystem)
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleListRepos prefers GUAC when it's configured (its persistence is
+// the real, exact dependency graph, not just this list); when it isn't,
+// it falls back to HydraDB's tracked-repos collection (see reposdb.go) so
+// a repo list still survives restarts without requiring a self-hosted
+// GUAC + Postgres deployment.
 func (s *apiServer) handleListRepos(w http.ResponseWriter, r *http.Request) {
 	if s.guac == nil {
+		if s.hydra != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+			defer cancel()
+			repos, err := s.listTrackedRepos(ctx)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"repos": repos, "guacEnabled": false, "hydradbTracking": true})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"repos": []any{}, "guacEnabled": false})
 		return
 	}

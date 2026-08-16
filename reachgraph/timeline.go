@@ -69,7 +69,12 @@ func (s *apiServer) persistTimelineFacts(ctx context.Context, subjectKind, subje
 		// "just this package" or "just this ecosystem" comes from
 		// AdditionalMetadata above plus metadata_filters at query time
 		// (see handleAsk in main.go), not from collection scoping.
-		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+		// 180s, not 60s: live testing found real HydraDB indexing latency
+		// for a scan's worth of facts running 30-60+ seconds even for a
+		// small batch, uncomfortably close to a tighter deadline — and
+		// since this is fire-and-forget (never blocks the scan response
+		// the user is waiting on), a longer budget here costs nothing.
+		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 180*time.Second)
 		defer cancel()
 		ids, err := s.hydra.ingestFacts(bgCtx, "", facts)
 		if err != nil {
@@ -77,7 +82,7 @@ func (s *apiServer) persistTimelineFacts(ctx context.Context, subjectKind, subje
 			return
 		}
 		log.Printf("hydradb timeline ingest queued %d fact(s) for %s, waiting for indexing", len(ids), subjectName)
-		s.hydra.waitForIndexing(bgCtx, ids)
+		s.hydra.waitForIndexing(bgCtx, "", ids)
 		log.Printf("hydradb timeline ingest finished indexing for %s", subjectName)
 	}()
 }

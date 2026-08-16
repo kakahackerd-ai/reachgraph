@@ -80,7 +80,7 @@
       grid.innerHTML = '';
       if (!d.repos || d.repos.length === 0) {
         empty.style.display = 'block';
-        empty.textContent = d.guacEnabled
+        empty.textContent = (d.guacEnabled || d.hydradbTracking)
           ? 'No repositories tracked yet — scan one above.'
           : 'GUAC_GRAPHQL_URL is not configured, so nothing persists between restarts. Scan a repository below to see it here for this session only.';
         if (label) label.style.display = 'none';

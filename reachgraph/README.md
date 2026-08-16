@@ -45,15 +45,16 @@ below) reinforced why that's the right call for anything that needs to be
 | 2 — multi-ecosystem (PyPI) | **Done.** See "Multi-ecosystem" below |
 | 2 — typosquat detection | **Done.** `typosquat.go` — real Damerau-Levenshtein distance, no embeddings |
 | 2 — shared-maintainer detection | **Done**, npm-only. `maintainers.go` — real registry data, honest about why PyPI isn't included |
-| Bonus (not in the implementation plan) — HydraDB narrative timeline & code-context query | **Done**, optional (needs `HYDRADB_API_KEY`). Timeline and code-structure narration are both wired into every scan; `POST /api/ask`, `POST /api/ask/feedback`, and `GET /api/code-graph` are all real and reachable, with a dashboard "Ask HydraDB" view on top. See "HydraDB" below |
+| Bonus (not in the implementation plan) — HydraDB narrative timeline, code-context query & repo storage | **Done**, optional (needs `HYDRADB_API_KEY`), live-confirmed against the real API. Timeline, code-structure narration, and tracked-repo storage are all wired into every scan; `POST /api/ask`, `POST /api/ask/feedback`, and `GET /api/code-graph` are all real and reachable, with a dashboard "Ask HydraDB" view on top. See "HydraDB" and "Storage: HydraDB vs. GUAC" below |
 | 1 — real-time watcher, auth | Not built. Still describes-only, in the implementation plan |
 
 ## HydraDB
 
-An optional third integration alongside GUAC, and the most deeply used of
-the two — not just an ingest-and-forget log, but every non-write-only
+An optional integration alongside GUAC, using every non-write-only
 primitive the real v2 API offers: ingest, async status, ranked query, exact
-graph relations, list, delete, database stats, and feedback. Set
+graph relations, list, delete, database stats, and feedback — and, since a
+real `HYDRADB_API_KEY` has now been exercised against the live API for
+every one of them, this section is live-confirmed, not spec-derived. Set
 `HYDRADB_API_KEY` (and optionally `HYDRADB_DATABASE`) and:
 
 - Every completed scan (`POST /api/scan` and `POST /api/scan-repo`)
@@ -63,6 +64,10 @@ graph relations, list, delete, database stats, and feedback. Set
   symbol/import extraction, not an LLM guess — into a per-repository
   HydraDB collection (`codegraph.go`), replacing that repo's stale facts
   from any previous scan rather than piling up duplicates.
+- Every repository scan also records itself in a `tracked-repos`
+  collection (`reposdb.go`) — HydraDB standing in for GUAC on the one
+  thing GUAC's persistence is actually read back for in this app (see
+  "Storage: HydraDB vs. GUAC" below).
 - `POST /api/ask` answers free-text questions over all of that, optionally
   scoped to one repo's code graph or exact-filtered to one package name.
 - `POST /api/ask/feedback` records a rating/comment against a previous
@@ -77,46 +82,104 @@ graph relations, list, delete, database stats, and feedback. Set
   and source documents, and send thumbs-up/down feedback. A "this repo's
   code" scan result links straight into it pre-filled.
 
-**What the real API actually looks like.** The three operations in the
-original build (`ingestFacts`, `waitForIndexing`, `query`) were confirmed
-against the live API with a real key during that earlier work — the
-documented request shapes turned out not to be what the API actually
-accepts (`POST /context/ingest` is `multipart/form-data`, not the JSON body
-the docs implied, and a bare `{subject,predicate,object}` triplet is
-silently accepted but produces nothing useful; HydraDB extracts its own
-entities and relations from natural-language text via its own pipeline).
-Everything added since — collections, `additional_metadata`,
-`metadata_filters`, batched status polling, `listSourceIDs`/
-`deleteSources`, `relations`, `stats`, `submitFeedback` — was implemented
-directly against HydraDB's own published OpenAPI document
-(`docs.hydradb.com/api-reference/v2/openapi.json`, fetched 2026-08-16),
-because no API key was available in this environment to re-confirm it live
-the same way. That distinction is called out in `hydradb.go`'s own doc
-comment, not smoothed over — one spot in particular (`/context/list`'s
-response shape) looks like it might be a spec-generator artifact rather
-than the real wire format, so `listSourceIDs` is written to fail open
-(logs and skips cleanup) rather than block anything if that guess is wrong.
+### Real bugs a live key found that the OpenAPI spec alone didn't catch
 
-**Two real bugs fixed while wiring this in**, both pre-existing and both
-silent (no test caught either, because nothing called the affected code):
-`indexCodeGraph` was fully implemented and unit-tested but no handler
-invoked it, so no code-graph facts were ever actually ingested; separately,
-`waitForIndexing` was also never called from anywhere, and independently
-checked for indexing status `"errored"`, which doesn't exist in the real
-API — the actual terminal states are `"completed"` and `"failed"`. Fixing
-the second one also fixed a latency bug in the same function: it polled
-each pending id in its own sequential loop, so a slow first id could starve
-every id after it of most of the deadline; it now polls every pending id in
-one batched `GET /context/status?ids=...&ids=...` call per cycle.
+Everything past the original three operations (`ingestFacts`,
+`waitForIndexing`, `query` — confirmed live in earlier work, when the
+documented `/context/ingest` JSON body turned out to actually need
+`multipart/form-data`) was first implemented against HydraDB's published
+OpenAPI document, then re-run against the real API once a key became
+available. Live testing (real `lodash/lodash` scans, real facts, real
+timing) surfaced six more gaps between the spec and the service, each fixed
+in `hydradb.go`:
 
-**Why typosquat detection doesn't use any of this:** the Track 02 typosquat
-check (`typosquat.go`) needs an exact answer — is this string within edit
-distance N of a known-popular name — and HydraDB's `/query` is ranked,
-relevancy-scored retrieval by design, even with `metadata_filters` and
-`collections` narrowing the candidate pool first. Real Damerau-Levenshtein
-edit distance gives an exact, complete answer for that specific class of
-problem instead; this was confirmed by actually exercising the live
-HydraDB query API during the original development, not assumed.
+1. **`/context/list`'s `page_size` maxes out at 100**, not the undocumented
+   default this client first sent (200) — the API rejects it outright with
+   a clear `page_size must be between 1 and 100` error, at least.
+2. **`include_fields: ["id"]` is rejected** ("`invalid include_fields:
+   id`") even though the OpenAPI example shows exactly that payload — `id`
+   is already always returned, so nothing needs projecting.
+3. **`graph_context.query_paths` came back empty (`[]`) on a real,
+   reasonable question that had good matching data** — the real triplets
+   were sitting in the sibling `chunk_relations` field the whole time,
+   which the original three-endpoint implementation (and this build's
+   first pass) never parsed. `query()` now merges both, picking whichever
+   has the best-scoring `combined_context` for `answer`.
+4. **`chunk_content` for a `knowledge`-type source ingested via
+   `app_knowledge` isn't plain text** — it's the entire source document
+   serialized as a JSON string (`{"id":"...","content":{"text":"..."},...`).
+   `extractChunkText` now unwraps just `content.text` for display.
+5. **Both `GET /context/status` and `DELETE /context` scope by
+   `collection`, and omitting it doesn't error — it just quietly finds
+   nothing.** For status, that reads as `indexing_status: "errored"` /
+   `"ID not found"` — not in the OpenAPI status enum (`queued`,
+   `processing`, `completed`, `failed`) at all, but a real value the live
+   API returns, now treated as terminal alongside the documented two so
+   `waitForIndexing` doesn't spin until its deadline over an id it's
+   asking about in the wrong scope. For delete, the same missing parameter
+   meant `deleteSources` silently "succeeded" against zero real deletions
+   for every code-graph rescan during testing — 92 stale facts accumulated
+   in HydraDB's own real storage before this was caught (cleaned up by
+   hand afterward). Fixed by threading `collection` through both calls,
+   requesting `X-HydraDB-Delete-Status: strict` so a no-op delete answers
+   409/404 instead of a lying 200, and having `deleteSources` return the
+   real `deleted_count` instead of trusting the status code alone.
+6. **Real indexing latency runs 30–120+ seconds**, not the couple of
+   seconds the original single-fact test suggested — a 23-file code-graph
+   batch took just under two minutes to reach `"completed"` in testing.
+   Both background timeouts (`timeline.go`, `codegraph.go`) were sized
+   against that early single-fact timing and were uncomfortably close to
+   racing real batches; both are now 180s/240s. Free to be generous here
+   since these goroutines are fire-and-forget and never hold up the scan
+   response the user is waiting on.
+
+The one corner still not independently confirmed: `/context/list`'s
+response shape decodes correctly live (`data.sources` flattened, matching
+this client's structs — the OpenAPI doc's `{"inner": {...}}` wrapper for
+that one type really does look like a spec-generator artifact, not the
+wire format), but `listSourceIDs`/`listSources` still fail open (log and
+skip cleanup) rather than trust that shape blindly, since it was the one
+guess made without having seen a real response first.
+
+## Storage: HydraDB vs. GUAC
+
+Asked directly: **can HydraDB replace GUAC here?** For the one thing GUAC's
+persistence is actually read back for by a running handler — the
+tracked-repository list behind `GET /api/repos` — yes, and `reposdb.go`
+now does exactly that: when `GUAC_GRAPHQL_URL` isn't set but
+`HYDRADB_API_KEY` is, every repo scan records a `{name, ecosystem}` fact
+into a HydraDB `tracked-repos` collection (replacing its own previous
+entry, not accumulating one per scan), and `/api/repos` reads it back —
+`GET /api/status`'s `hydradbTracking` flag reports which path is active.
+That's a real, live-tested, exact-match need (list membership, not
+approximate retrieval), and it means a repo list survives restarts without
+standing up `./deploy/setup-guac.sh`'s self-hosted Postgres + GUAC build.
+
+**What did *not* move, deliberately:** GUAC's other role — the real
+pURL-typed dependency graph, diamond-dependency deduplication, and
+vulnerability certifications built from `ingestPackages`/
+`ingestDependencies`/`ingestVulnerabilities`/`ingestCertifyVulns` — stays
+on GUAC. HydraDB's own extraction pipeline turns natural-language text
+into entities and relations via its own LLM-driven process (real, useful,
+and exactly the right tool for the timeline and code-graph features above)
+but that's fundamentally different from a typed, exact graph store: it's
+retrieval over extracted facts, not a queryable schema with real foreign
+keys. Re-encoding GUAC's SBOM-precision data as narrated sentences and
+reconstructing it from HydraDB's graph extraction would trade exactness
+for approximation on data where exactness is the entire point — the same
+reasoning that already keeps typosquat detection (below) on real
+Damerau-Levenshtein distance instead of a HydraDB query. If GUAC is
+configured, it still wins for `/api/repos` (see `handleListRepos` in
+`main.go`) — HydraDB only takes over when GUAC isn't set.
+
+**Why typosquat detection doesn't use HydraDB either:** the Track 02
+typosquat check (`typosquat.go`) needs an exact answer — is this string
+within edit distance N of a known-popular name — and HydraDB's `/query` is
+ranked, relevancy-scored retrieval by design, even with `metadata_filters`
+and `collections` narrowing the candidate pool first. Real
+Damerau-Levenshtein edit distance gives an exact, complete answer for that
+specific class of problem instead; this was confirmed by actually
+exercising the live HydraDB query API, not assumed.
 
 **Still-open gap:** `GET /context/relations` (and the `/api/code-graph`
 endpoint built on it) is implemented and reachable, but the dashboard
@@ -351,12 +414,13 @@ POST /api/scan-repo  {"owner":"lodash","repo":"lodash"}
   invalid-token path (clear rejected-auth error, not a crash) were both
   tested for real; the "valid token, real alerts returned" path is written
   against GitHub's published, versioned schema but hasn't been run.
-- **HydraDB's endpoints past the original three (ingest/status/query) are
-  implemented against its published OpenAPI spec, not re-confirmed against
-  the live API with a real key** — no key was available in this
-  environment. `listSourceIDs` in particular is written to fail open if its
-  guessed response shape is wrong; see "HydraDB" above for the full list
-  and reasoning.
+- **`listSourceIDs`/`listSources` still fail open on a decode miss.** Every
+  other HydraDB code path here has been exercised against the live API
+  with a real key (see "HydraDB" above for the specific bugs that testing
+  found and fixed); `/context/list`'s response shape is the one spot that
+  decoded correctly on the first real call rather than being independently
+  cross-checked beforehand, so the defensive fail-open behavior stays in
+  place rather than being removed on one successful observation.
 - **The code graph HydraDB extracts per repository has no graph UI yet.**
   `GET /api/code-graph` is real and reachable; the dashboard only visualizes
   `/api/ask`'s ranked answers, not the complete relation set.
