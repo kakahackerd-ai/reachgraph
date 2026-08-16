@@ -46,16 +46,38 @@ func (s *apiServer) persistTimelineFacts(ctx context.Context, subjectKind, subje
 			)
 			item := hydraKnowledgeItem{Title: fmt.Sprintf("%s@%s:%s@%s", subjectName, ts, p.Target.Name, p.Target.Version)}
 			item.Content.Text = text
+			item.AdditionalMetadata = map[string]any{
+				"subject_kind":   subjectKind,
+				"subject_name":   subjectName,
+				"ecosystem":      ecosystem,
+				"target_name":    p.Target.Name,
+				"target_version": p.Target.Version,
+				"risk_label":     p.Score.Label,
+				"risk_score":     p.Score.Value,
+				"scanned_at":     ts,
+			}
+			if len(findingIDs) > 0 {
+				item.AdditionalMetadata["finding_ids"] = findingIDs
+			}
 			facts = append(facts, item)
 		}
 
+		// Deliberately not collection-scoped: the whole point of this
+		// timeline is answering "which repos/packages" across everything
+		// ever scanned, so facts go into the database's default collection
+		// where a cross-subject query can reach all of them. Exactness for
+		// "just this package" or "just this ecosystem" comes from
+		// AdditionalMetadata above plus metadata_filters at query time
+		// (see handleAsk in main.go), not from collection scoping.
 		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
 		defer cancel()
-		ids, err := s.hydra.ingestFacts(bgCtx, facts)
+		ids, err := s.hydra.ingestFacts(bgCtx, "", facts)
 		if err != nil {
 			log.Printf("hydradb timeline ingest failed for %s: %v", subjectName, err)
 			return
 		}
-		log.Printf("hydradb timeline ingest queued %d fact(s) for %s", len(ids), subjectName)
+		log.Printf("hydradb timeline ingest queued %d fact(s) for %s, waiting for indexing", len(ids), subjectName)
+		s.hydra.waitForIndexing(bgCtx, ids)
+		log.Printf("hydradb timeline ingest finished indexing for %s", subjectName)
 	}()
 }

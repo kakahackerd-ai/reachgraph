@@ -90,9 +90,12 @@ func firstNonEmpty(ss []string) string {
 const maxCodeGraphFiles = 60 // bounded: this narrates one fact per symbol/import to HydraDB, real network calls each
 
 // indexCodeGraph fetches a bounded set of the repository's real source
-// files, extracts their real structure, and narrates it into HydraDB.
-// Fire-and-forget, like the timeline and GUAC persistence — a slow or
-// unconfigured HydraDB must never hold up a scan response.
+// files, extracts their real structure, and narrates it into HydraDB,
+// scoped to a collection named after the repository so /api/ask and
+// /api/code-graph can query just this repo's code without cross-repo
+// noise. Fire-and-forget, like the timeline and GUAC persistence — a slow
+// or unconfigured HydraDB must never hold up the scan response. Called
+// from handleScanRepo in main.go.
 func (s *apiServer) indexCodeGraph(ctx context.Context, ecosystem, owner, repo, ref string) {
 	if s.hydra == nil {
 		return
@@ -110,8 +113,10 @@ func (s *apiServer) indexCodeGraph(ctx context.Context, ecosystem, owner, repo, 
 			files = files[:maxCodeGraphFiles]
 		}
 
-		var facts []hydraKnowledgeItem
 		repoLabel := owner + "/" + repo
+		collection := hydraCollectionName(repoLabel)
+
+		var facts []hydraKnowledgeItem
 		for _, path := range files {
 			content, ok, err := s.github.rawFile(bgCtx, owner, repo, ref, path)
 			if err != nil || !ok {
@@ -136,17 +141,42 @@ func (s *apiServer) indexCodeGraph(ctx context.Context, ecosystem, owner, repo, 
 
 			item := hydraKnowledgeItem{Title: repoLabel + ":" + path}
 			item.Content.Text = sb.String()
+			item.AdditionalMetadata = map[string]any{
+				"repo":      repoLabel,
+				"file":      path,
+				"ecosystem": ecosystem,
+				"symbols":   len(symbols),
+				"imports":   len(imports),
+			}
 			facts = append(facts, item)
 		}
 
 		if len(facts) == 0 {
 			return
 		}
-		ids, err := s.hydra.ingestFacts(bgCtx, facts)
+
+		// This repo's own previous code-graph facts are now stale — files
+		// may have been renamed, deleted, or rewritten since the last
+		// scan — so drop them before ingesting the current scan's facts.
+		// Best-effort: a list or delete failure just means the collection
+		// accumulates old facts alongside new ones instead of staying
+		// tidy (degraded relevance, not a correctness problem), so it's
+		// logged and never blocks the ingest below.
+		if staleIDs, err := s.hydra.listSourceIDs(bgCtx, collection); err != nil {
+			log.Printf("code graph: listing existing sources failed for %s (continuing without cleanup): %v", repoLabel, err)
+		} else if len(staleIDs) > 0 {
+			if err := s.hydra.deleteSources(bgCtx, staleIDs); err != nil {
+				log.Printf("code graph: deleting %d stale source(s) failed for %s (continuing): %v", len(staleIDs), repoLabel, err)
+			}
+		}
+
+		ids, err := s.hydra.ingestFacts(bgCtx, collection, facts)
 		if err != nil {
 			log.Printf("code graph: hydradb ingest failed for %s: %v", repoLabel, err)
 			return
 		}
-		log.Printf("code graph: indexed %d file(s) into hydradb for %s", len(ids), repoLabel)
+		log.Printf("code graph: indexed %d file(s) into hydradb collection %q for %s, waiting for indexing", len(ids), collection, repoLabel)
+		s.hydra.waitForIndexing(bgCtx, ids)
+		log.Printf("code graph: finished indexing for %s", repoLabel)
 	}()
 }

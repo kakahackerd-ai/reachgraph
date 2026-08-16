@@ -139,6 +139,14 @@
   .dep-item p { margin: 4px 0 0; color: var(--ink-soft); }
   .dep-empty { padding: 14px 16px; font-size: 12.5px; color: var(--ink-faint); }
 
+  /* ---------- ask ---------- */
+  .ask-panel { margin: 4px 0 20px; }
+  .ask-feedback { display: flex; gap: 4px; }
+  .ask-feedback .btn-ghost { padding: 5px 9px; font-size: 14px; }
+  .ask-feedback .btn-ghost.active { background: var(--accent-wash); color: var(--accent); border-color: transparent; }
+  .ask-answer-body { padding: 16px; font-size: 13.5px; line-height: 1.6; color: var(--ink); }
+  .ask-answer-body .req-id { display: block; margin-top: 10px; font-size: 11px; color: var(--ink-faint); }
+
   /* ---------- inspector ---------- */
   .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.35); opacity: 0; pointer-events: none; transition: opacity 180ms ease; z-index: 30; }
   .scrim.open { opacity: 1; pointer-events: auto; }
@@ -182,6 +190,9 @@
     <button class="rail-btn" id="nav-repos" title="Repositories">
       <svg viewBox="0 0 22 22" fill="none"><rect x="4" y="5" width="14" height="4.2" rx="1.4" stroke="currentColor" stroke-width="1.6"/><rect x="4" y="10.4" width="14" height="4.2" rx="1.4" stroke="currentColor" stroke-width="1.6"/><rect x="4" y="15.8" width="9" height="2.6" rx="1.2" stroke="currentColor" stroke-width="1.6"/></svg>
     </button>
+    <button class="rail-btn" id="nav-ask" title="Ask HydraDB">
+      <svg viewBox="0 0 22 22" fill="none"><circle cx="11" cy="11" r="7.2" stroke="currentColor" stroke-width="1.6"/><path d="M8.6 9.3c.25-1.35 1.5-2.1 2.75-1.85 1.25.25 2.05 1.2 1.8 2.35-.2.95-1.05 1.25-1.65 1.7-.5.4-.7.7-.7 1.35" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="11" cy="14.9" r="0.9" fill="currentColor"/></svg>
+    </button>
     <div class="rail-spacer"></div>
     <button class="rail-org" title="Reachgraph">RG</button>
   </aside>
@@ -192,6 +203,7 @@
       <div class="topbar-spacer"></div>
       <span class="badge" id="guac-badge"><span class="dot"></span>GUAC persistence</span>
       <span class="badge" id="gh-badge"><span class="dot"></span>Dependabot token</span>
+      <span class="badge" id="hydra-badge"><span class="dot"></span>HydraDB</span>
     </header>
 
     <div class="content" id="content">
@@ -240,6 +252,46 @@
         <div class="empty-note" id="repo-empty-2" style="display:none"></div>
       </section>
 
+      <!-- ASK -->
+      <section class="view view-narrow" id="view-ask" hidden>
+        <h1 class="page-title">Ask HydraDB</h1>
+        <p class="page-sub">Natural-language queries over every scan's narrated timeline and code-graph facts — real ranked retrieval from HydraDB, not a canned answer.</p>
+
+        <form class="scan-form" id="form-ask">
+          <input type="text" id="input-ask-question" class="mono" placeholder="e.g. which repos resolved a flagged version of minimist?" autocomplete="off" spellcheck="false">
+          <button type="submit" class="btn btn-primary">Ask</button>
+        </form>
+        <div class="scan-form">
+          <input type="text" id="input-ask-repo" class="mono" placeholder="optional: scope to owner/repo's code graph" autocomplete="off" spellcheck="false">
+          <input type="text" id="input-ask-package" class="mono" placeholder="optional: exact package name filter" autocomplete="off" spellcheck="false">
+        </div>
+        <p class="hint">Repo scope searches only that repository's own indexed code structure (a HydraDB collection). Package filter exact-matches the flagged dependency name via HydraDB metadata_filters, not a text guess.</p>
+
+        <div class="status-row" id="ask-status-row"><div class="spinner"></div><span>Asking HydraDB…</span></div>
+        <div class="error-box" id="ask-error-box"></div>
+
+        <div class="panel ask-panel" id="ask-answer-panel" style="display:none">
+          <div class="panel-head">
+            <h2>Answer</h2>
+            <div class="ask-feedback">
+              <button class="btn-ghost" id="ask-feedback-up" title="Good answer">&#128077;</button>
+              <button class="btn-ghost" id="ask-feedback-down" title="Bad answer">&#128078;</button>
+            </div>
+          </div>
+          <div class="ask-answer-body" id="ask-answer-body"></div>
+        </div>
+
+        <div class="panel dep-panel" id="ask-triplets-panel" style="display:none">
+          <div class="panel-head"><h2>Graph relations HydraDB matched</h2></div>
+          <div id="ask-triplets-body"></div>
+        </div>
+
+        <div class="panel dep-panel" id="ask-sources-panel" style="display:none">
+          <div class="panel-head"><h2>Sources</h2></div>
+          <div id="ask-sources-body"></div>
+        </div>
+      </section>
+
       <!-- RESULT -->
       <section class="view view-wide" id="view-result" hidden>
         <button class="btn-ghost" id="back-to-overview" style="margin-bottom:16px">&larr; Back</button>
@@ -248,6 +300,7 @@
           <div>
             <h1 id="result-title">&nbsp;</h1>
             <div class="stat-row" id="result-stats"></div>
+            <button class="btn-ghost" id="ask-about-repo" style="display:none;margin-top:10px">Ask HydraDB about this repo's code &rarr;</button>
           </div>
           <div class="score-badge" id="result-score" style="display:none">
             <div class="num" id="result-score-num">0</div>

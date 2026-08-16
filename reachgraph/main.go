@@ -162,6 +162,8 @@ func main() {
 	mux.HandleFunc("POST /api/scan-repo", srv.handleScanRepo)
 	mux.HandleFunc("POST /api/expand", srv.handleExpand)
 	mux.HandleFunc("POST /api/ask", srv.handleAsk)
+	mux.HandleFunc("POST /api/ask/feedback", srv.handleAskFeedback)
+	mux.HandleFunc("GET /api/code-graph", srv.handleCodeGraph)
 	mux.HandleFunc("GET /api/repos", srv.handleListRepos)
 	mux.HandleFunc("GET /api/status", srv.handleStatus)
 	mux.Handle("/", http.FileServer(http.FS(webContent)))
@@ -179,23 +181,45 @@ func logRequests(next http.Handler) http.Handler {
 }
 
 func (s *apiServer) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	status := map[string]any{
 		"guacEnabled":        s.guac != nil,
 		"githubTokenPresent": strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) != "",
 		"hydradbEnabled":     s.hydra != nil,
-	})
+	}
+	if s.hydra != nil {
+		// Best-effort: a real row count is a nicer signal than a bare
+		// boolean, but a slow/unreachable stats call must never hold up
+		// the status endpoint itself.
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if stats, err := s.hydra.stats(ctx); err == nil {
+			status["hydradbStats"] = stats
+		}
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 type askRequest struct {
 	Question string `json:"question"`
+	// Repo, if set ("owner/repo"), scopes the query to that repository's
+	// own code-graph collection (see indexCodeGraph in codegraph.go)
+	// instead of searching every collection.
+	Repo string `json:"repo,omitempty"`
+	// Package, if set, exact-filters timeline facts to that dependency
+	// name via metadata_filters — see the additional_metadata written in
+	// persistTimelineFacts (timeline.go) — rather than relying on the
+	// ranker to surface it from free text.
+	Package string `json:"package,omitempty"`
 }
 
 // handleAsk is the natural-language surface over whatever's been narrated
-// into HydraDB: scan-timeline facts (see persistTimelineFacts) and, for
-// repos that have had their source ingested, code-structure facts (see
-// track_b.go). Answers are HydraDB's own ranked retrieval — presented as
-// "here's what looked most relevant," never as a guaranteed-complete
-// answer, because that's honestly what the underlying API gives back.
+// into HydraDB: scan-timeline facts (see persistTimelineFacts in
+// timeline.go) and, for repos that have had their source ingested,
+// code-structure facts (see indexCodeGraph in codegraph.go). Answers are
+// HydraDB's own ranked retrieval — presented as "here's what looked most
+// relevant," never as a guaranteed-complete answer, because that's
+// honestly what the underlying API gives back. Repo/Package narrow that
+// with exact collection/metadata matches where the caller has them.
 func (s *apiServer) handleAsk(w http.ResponseWriter, r *http.Request) {
 	if s.hydra == nil {
 		writeError(w, http.StatusServiceUnavailable, "HYDRADB_API_KEY is not configured on this server")
@@ -214,7 +238,76 @@ func (s *apiServer) handleAsk(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	result, err := s.hydra.query(ctx, req.Question)
+	var opts hydraQueryOptions
+	if repo := strings.TrimSpace(req.Repo); repo != "" {
+		opts.Collections = []string{hydraCollectionName(repo)}
+	}
+	if pkg := strings.TrimSpace(req.Package); pkg != "" {
+		opts.MetadataFilters = map[string]any{
+			"additional_metadata": map[string]any{"target_name": pkg},
+		}
+	}
+
+	result, err := s.hydra.query(ctx, req.Question, opts)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+type askFeedbackRequest struct {
+	RequestID string `json:"requestId"`
+	Rating    string `json:"rating,omitempty"` // "positive" | "negative" | "neutral"
+	Comment   string `json:"comment,omitempty"`
+}
+
+// handleAskFeedback closes the loop on handleAsk: it records a rating
+// and/or comment against a previous answer's requestId (hydraQueryResult's
+// RequestID, taken from HydraDB's own response meta) via HydraDB's real
+// POST /feedback endpoint.
+func (s *apiServer) handleAskFeedback(w http.ResponseWriter, r *http.Request) {
+	if s.hydra == nil {
+		writeError(w, http.StatusServiceUnavailable, "HYDRADB_API_KEY is not configured on this server")
+		return
+	}
+	var req askFeedbackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	req.RequestID = strings.TrimSpace(req.RequestID)
+	if req.RequestID == "" {
+		writeError(w, http.StatusBadRequest, "\"requestId\" is required — it comes from a prior /api/ask response")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	if err := s.hydra.submitFeedback(ctx, req.RequestID, req.Rating, req.Comment); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "recorded"})
+}
+
+// handleCodeGraph returns the real, complete graph of code-structure
+// relations HydraDB extracted for one repository (see indexCodeGraph in
+// codegraph.go) via GET /context/relations — every relation in that
+// repo's collection, not a ranked top-k, unlike /api/ask.
+func (s *apiServer) handleCodeGraph(w http.ResponseWriter, r *http.Request) {
+	if s.hydra == nil {
+		writeError(w, http.StatusServiceUnavailable, "HYDRADB_API_KEY is not configured on this server")
+		return
+	}
+	owner := strings.TrimSpace(r.URL.Query().Get("owner"))
+	repo := strings.TrimSpace(r.URL.Query().Get("repo"))
+	if owner == "" || repo == "" {
+		writeError(w, http.StatusBadRequest, "\"owner\" and \"repo\" query parameters are required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	result, err := s.hydra.relations(ctx, hydraCollectionName(owner+"/"+repo), "", 500)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -629,6 +722,7 @@ func (s *apiServer) handleScanRepo(w http.ResponseWriter, r *http.Request) {
 
 	s.persistToGUAC(context.WithoutCancel(ctx), resp.Subject.Name, g, paths)
 	s.persistTimelineFacts(ctx, "repository", resp.Subject.Name, req.Ecosystem, start, paths)
+	s.indexCodeGraph(context.WithoutCancel(ctx), req.Ecosystem, req.Owner, req.Repo, ref)
 	writeJSON(w, http.StatusOK, resp)
 }
 

@@ -45,62 +45,84 @@ below) reinforced why that's the right call for anything that needs to be
 | 2 — multi-ecosystem (PyPI) | **Done.** See "Multi-ecosystem" below |
 | 2 — typosquat detection | **Done.** `typosquat.go` — real Damerau-Levenshtein distance, no embeddings |
 | 2 — shared-maintainer detection | **Done**, npm-only. `maintainers.go` — real registry data, honest about why PyPI isn't included |
-| Bonus (not in the implementation plan) — HydraDB narrative timeline & code-context query | **Partially done**, optional (needs `HYDRADB_API_KEY`). Scan-timeline narration is wired into every scan and queryable via `POST /api/ask`; code-structure narration is implemented and unit-tested but not yet called from any handler. See "HydraDB" below |
+| Bonus (not in the implementation plan) — HydraDB narrative timeline & code-context query | **Done**, optional (needs `HYDRADB_API_KEY`). Timeline and code-structure narration are both wired into every scan; `POST /api/ask`, `POST /api/ask/feedback`, and `GET /api/code-graph` are all real and reachable, with a dashboard "Ask HydraDB" view on top. See "HydraDB" below |
 | 1 — real-time watcher, auth | Not built. Still describes-only, in the implementation plan |
 
 ## HydraDB
 
-An optional third integration alongside GUAC. Set `HYDRADB_API_KEY` (and
-optionally `HYDRADB_DATABASE`) and the server narrates real events into
-HydraDB as natural-language facts, then exposes `POST /api/ask` — a
-free-text question over everything narrated so far, answered by HydraDB's
-own ranked-retrieval query API. `GET /api/status` reports `hydradbEnabled`.
+An optional third integration alongside GUAC, and the most deeply used of
+the two — not just an ingest-and-forget log, but every non-write-only
+primitive the real v2 API offers: ingest, async status, ranked query, exact
+graph relations, list, delete, database stats, and feedback. Set
+`HYDRADB_API_KEY` (and optionally `HYDRADB_DATABASE`) and:
 
-**What the real API actually looks like** — confirmed against the live
-service during development, not assumed from docs (see `hydradb.go`):
-`POST /context/ingest` is `multipart/form-data` — a `database` field plus
-an `app_knowledge` field carrying a JSON array of `{title, content: {text}}`
-objects — not the JSON body the documented shape implied, and not a
-pre-formed `{subject,predicate,object}` triplet either; HydraDB extracts
-its own entities and relations from the text via its own pipeline, and a
-bare triplet array is silently accepted but produces nothing useful.
-Ingestion is asynchronous, polled via `GET /context/status` until
-`indexing_status` is `completed`. `POST /query` takes `{database, query,
-type, graph_context}` as a JSON body and returns relevancy-scored
-`query_paths` — ranked retrieval, not a guaranteed-complete traversal.
+- Every completed scan (`POST /api/scan` and `POST /api/scan-repo`)
+  narrates its flagged findings into a timestamped natural-language
+  timeline (`timeline.go`).
+- Every repository scan also narrates its code structure — real
+  symbol/import extraction, not an LLM guess — into a per-repository
+  HydraDB collection (`codegraph.go`), replacing that repo's stale facts
+  from any previous scan rather than piling up duplicates.
+- `POST /api/ask` answers free-text questions over all of that, optionally
+  scoped to one repo's code graph or exact-filtered to one package name.
+- `POST /api/ask/feedback` records a rating/comment against a previous
+  answer.
+- `GET /api/code-graph?owner=&repo=` returns the *complete* extracted code
+  graph for one repository — every relation, not a ranked top-k.
+- `GET /api/status` reports `hydradbEnabled` backed by a real row count
+  (`hydradbStats`), not just a boolean.
+- The dashboard's **Ask HydraDB** view (nav rail, third icon) is a real,
+  clickable surface for all of this: ask a question, optionally scope it to
+  a repo or package, see the ranked answer with its matched graph relations
+  and source documents, and send thumbs-up/down feedback. A "this repo's
+  code" scan result links straight into it pre-filled.
 
-Two real features are built on this:
+**What the real API actually looks like.** The three operations in the
+original build (`ingestFacts`, `waitForIndexing`, `query`) were confirmed
+against the live API with a real key during that earlier work — the
+documented request shapes turned out not to be what the API actually
+accepts (`POST /context/ingest` is `multipart/form-data`, not the JSON body
+the docs implied, and a bare `{subject,predicate,object}` triplet is
+silently accepted but produces nothing useful; HydraDB extracts its own
+entities and relations from natural-language text via its own pipeline).
+Everything added since — collections, `additional_metadata`,
+`metadata_filters`, batched status polling, `listSourceIDs`/
+`deleteSources`, `relations`, `stats`, `submitFeedback` — was implemented
+directly against HydraDB's own published OpenAPI document
+(`docs.hydradb.com/api-reference/v2/openapi.json`, fetched 2026-08-16),
+because no API key was available in this environment to re-confirm it live
+the same way. That distinction is called out in `hydradb.go`'s own doc
+comment, not smoothed over — one spot in particular (`/context/list`'s
+response shape) looks like it might be a spec-generator artifact rather
+than the real wire format, so `listSourceIDs` is written to fail open
+(logs and skips cleanup) rather than block anything if that guess is wrong.
 
-- **Narrative timeline** (`timeline.go`) — every completed scan (single
-  package or repository, both `handleScan` and `handleScanRepo`) narrates
-  its flagged findings as timestamped facts ("At 2026-08-16T..., repository
-  lodash/lodash resolved dependency minimist to version 1.2.5, flagged
-  CRITICAL..."), giving `/api/ask` a real answer to Track 02's "which
-  applications resolved the compromised version while it was live" —
-  HydraDB's own headline feature (git-style temporal versioning) applied
-  directly to the blast-radius problem. Fire-and-forget, like GUAC
-  persistence: a slow or unreachable HydraDB never holds up the scan
-  response.
-- **Code-context graph** (`codegraph.go`) — regex-based extraction of real
-  function/class definitions and imports from a repo's own source (separate
-  JS/TS and Python patterns), meant to be narrated into HydraDB so
-  `/api/ask` could answer "where is X defined" / "what imports Y" with
-  graph-relevant answers instead of top-k similar-looking chunks from a
-  plain vector index — HydraDB's own stated designed purpose (a context
-  graph for AI agents), unlike the timeline feature, which uses it slightly
-  against the grain. **Honest gap:** `indexCodeGraph` is implemented and
-  covered by `codegraph_test.go` (JS and Python extraction both pinned
-  down), but no handler calls it yet, so no code-graph facts are actually
-  ingested by the running server today — `/api/ask` currently only has
-  timeline facts to draw on.
+**Two real bugs fixed while wiring this in**, both pre-existing and both
+silent (no test caught either, because nothing called the affected code):
+`indexCodeGraph` was fully implemented and unit-tested but no handler
+invoked it, so no code-graph facts were ever actually ingested; separately,
+`waitForIndexing` was also never called from anywhere, and independently
+checked for indexing status `"errored"`, which doesn't exist in the real
+API — the actual terminal states are `"completed"` and `"failed"`. Fixing
+the second one also fixed a latency bug in the same function: it polled
+each pending id in its own sequential loop, so a slow first id could starve
+every id after it of most of the deadline; it now polls every pending id in
+one batched `GET /context/status?ids=...&ids=...` call per cycle.
 
-**Why typosquat detection doesn't use this:** the Track 02 typosquat check
-(`typosquat.go`) needs an exact answer — is this string within edit
+**Why typosquat detection doesn't use any of this:** the Track 02 typosquat
+check (`typosquat.go`) needs an exact answer — is this string within edit
 distance N of a known-popular name — and HydraDB's `/query` is ranked,
-relevancy-scored retrieval, not a guaranteed-complete result set. Real
-Damerau-Levenshtein edit distance gives an exact, complete answer for that
-class of problem instead; this was confirmed by actually exercising the
-live HydraDB query API during development, not assumed.
+relevancy-scored retrieval by design, even with `metadata_filters` and
+`collections` narrowing the candidate pool first. Real Damerau-Levenshtein
+edit distance gives an exact, complete answer for that specific class of
+problem instead; this was confirmed by actually exercising the live
+HydraDB query API during the original development, not assumed.
+
+**Still-open gap:** `GET /context/relations` (and the `/api/code-graph`
+endpoint built on it) is implemented and reachable, but the dashboard
+doesn't render it as a graph yet — only `/api/ask`'s ranked answers get a
+UI. Browsing a repo's full extracted code graph currently means hitting
+the endpoint directly.
 
 ## Multi-ecosystem (PyPI)
 
@@ -167,8 +189,12 @@ room for. Switching the gate to hop count fixed both sides of that at once;
 
 `web/index.html` + `web/app.js` is a real multi-view app, not a single scan
 box: an Overview with a package/repository scan launcher and tracked-repo
-grid, a Repositories view backed by `/api/repos`, and a Result view built
-around an animated dependency graph.
+grid, a Repositories view backed by `/api/repos`, a Result view built
+around an animated dependency graph, and an Ask HydraDB view (see
+"HydraDB" above) that calls `/api/ask` and `/api/ask/feedback` for real —
+question in, HydraDB's ranked answer with its matched graph relations and
+source documents back out, with a repo-scope shortcut linked directly from
+a repository scan's result page.
 
 The graph (`web/vendor/cytoscape.min.js` — real
 [Cytoscape.js](https://github.com/cytoscape/cytoscape.js), MIT-licensed, not
@@ -181,11 +207,18 @@ real, live deps.dev lookup for just that one package, not data that was
 already loaded and hidden. Clicking a ranked path in the list below
 highlights and re-centers that exact path in the graph above.
 
-This was driven end to end with a real headless browser during development
-— 21 checks covering navigation, both scan types, node clicks (via real
-mouse coordinates read from Cytoscape's own rendered node positions, not
-guessed pixel offsets), the expand flow, and the tracked-repositories
-round-trip through GUAC, all passing with zero browser console errors.
+The Overview/Repositories/Result flow was driven end to end with a real
+headless browser during development — 21 checks covering navigation, both
+scan types, node clicks (via real mouse coordinates read from Cytoscape's
+own rendered node positions, not guessed pixel offsets), the expand flow,
+and the tracked-repositories round-trip through GUAC, all passing with zero
+browser console errors. **Honest gap:** the Ask HydraDB view was added in a
+session with no browser automation available, so it has not been driven
+the same way — it's been checked statically (JS syntax, every DOM id it
+references cross-checked against the actual markup, live `curl` against a
+running server confirming `/api/ask`, `/api/ask/feedback`, and
+`/api/code-graph` all degrade to a clean 503 with no key configured) but
+not clicked through in a real browser.
 Three checks failed on the first pass and turned out to be wrong test
 assumptions once debugged, not application bugs — worth naming because they
 are, themselves, real findings: `express@4.17.0` carries two CVEs against
@@ -318,6 +351,12 @@ POST /api/scan-repo  {"owner":"lodash","repo":"lodash"}
   invalid-token path (clear rejected-auth error, not a crash) were both
   tested for real; the "valid token, real alerts returned" path is written
   against GitHub's published, versioned schema but hasn't been run.
-- **HydraDB code-graph narration is not wired in.** `codegraph.go`'s
-  `indexCodeGraph` is implemented and unit-tested, but no handler invokes
-  it yet — see "HydraDB" above.
+- **HydraDB's endpoints past the original three (ingest/status/query) are
+  implemented against its published OpenAPI spec, not re-confirmed against
+  the live API with a real key** — no key was available in this
+  environment. `listSourceIDs` in particular is written to fail open if its
+  guessed response shape is wrong; see "HydraDB" above for the full list
+  and reasoning.
+- **The code graph HydraDB extracts per repository has no graph UI yet.**
+  `GET /api/code-graph` is real and reachable; the dashboard only visualizes
+  `/api/ask`'s ranked answers, not the complete relation set.

@@ -10,20 +10,27 @@
   fetch('/api/status').then(function (r) { return r.json(); }).then(function (s) {
     if (s.guacEnabled) $('guac-badge').classList.add('on');
     if (s.githubTokenPresent) $('gh-badge').classList.add('on');
+    if (s.hydradbEnabled) {
+      $('hydra-badge').classList.add('on');
+      if (s.hydradbStats) $('hydra-badge').title = s.hydradbStats.knowledgeRows + ' knowledge fact(s) indexed';
+    }
   }).catch(function () {});
 
   // ---- nav ----
-  var views = { overview: $('view-overview'), repos: $('view-repos'), result: $('view-result') };
+  var views = { overview: $('view-overview'), repos: $('view-repos'), ask: $('view-ask'), result: $('view-result') };
+  var crumbNames = { overview: 'Overview', repos: 'Repositories', ask: 'Ask HydraDB' };
   function showView(name) {
     Object.keys(views).forEach(function (k) { views[k].hidden = true; });
     views[name].hidden = false;
     $('nav-overview').classList.toggle('active', name === 'overview');
     $('nav-repos').classList.toggle('active', name === 'repos');
-    $('crumb').textContent = name === 'overview' ? 'Overview' : name === 'repos' ? 'Repositories' : $('crumb').textContent;
+    $('nav-ask').classList.toggle('active', name === 'ask');
+    $('crumb').textContent = crumbNames[name] || $('crumb').textContent;
     $('content').scrollTop = 0;
   }
   $('nav-overview').addEventListener('click', function () { showView('overview'); });
   $('nav-repos').addEventListener('click', function () { showView('repos'); loadRepos('2'); });
+  $('nav-ask').addEventListener('click', function () { showView('ask'); });
   $('back-to-overview').addEventListener('click', function () { showView('overview'); });
 
   // ---- tabs ----
@@ -189,6 +196,18 @@
     renderTyposquats(data.typosquats);
     renderSharedMaintainers(data.sharedMaintainers);
     loadRepos('1');
+
+    var askBtn = $('ask-about-repo');
+    if (data.subject.kind === 'repository') {
+      askBtn.style.display = 'inline-block';
+      askBtn.onclick = function () {
+        $('input-ask-repo').value = data.subject.name;
+        $('input-ask-question').value = 'what does this repository import?';
+        showView('ask');
+      };
+    } else {
+      askBtn.style.display = 'none';
+    }
   }
 
   function renderTyposquats(findings) {
@@ -427,6 +446,89 @@
   $('inspector-close').addEventListener('click', closeInspector);
   $('scrim').addEventListener('click', closeInspector);
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeInspector(); });
+
+  // ---- HydraDB ask ----
+  var lastAskRequestId = '';
+
+  function setAskLoading(on) {
+    $('ask-status-row').classList.toggle('visible', on);
+    if (on) $('ask-error-box').classList.remove('visible');
+  }
+  function showAskError(msg) {
+    $('ask-error-box').textContent = msg;
+    $('ask-error-box').classList.add('visible');
+    $('ask-status-row').classList.remove('visible');
+  }
+
+  function askHydra(question, repo, pkg) {
+    setAskLoading(true);
+    $('ask-answer-panel').style.display = 'none';
+    $('ask-triplets-panel').style.display = 'none';
+    $('ask-sources-panel').style.display = 'none';
+    $('ask-feedback-up').classList.remove('active');
+    $('ask-feedback-down').classList.remove('active');
+    var body = { question: question };
+    if (repo) body.repo = repo;
+    if (pkg) body.package = pkg;
+    fetch('/api/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) {
+        setAskLoading(false);
+        if (!res.ok) { showAskError(res.d.error || 'ask failed'); return; }
+        renderAskResult(res.d);
+      })
+      .catch(function (err) { setAskLoading(false); showAskError(String(err)); });
+  }
+
+  function renderAskResult(d) {
+    lastAskRequestId = d.requestId || '';
+    $('ask-answer-panel').style.display = 'block';
+    var html = d.answer
+      ? esc(d.answer)
+      : '<span style="color:var(--ink-faint)">HydraDB found nothing relevant yet — scan something first, or try a broader question.</span>';
+    if (lastAskRequestId) html += '<span class="req-id mono">requestId: ' + esc(lastAskRequestId) + '</span>';
+    $('ask-answer-body').innerHTML = html;
+
+    var tPanel = $('ask-triplets-panel');
+    if (d.triplets && d.triplets.length) {
+      tPanel.style.display = 'block';
+      $('ask-triplets-body').innerHTML = d.triplets.map(function (t) {
+        return '<div class="dep-item"><span class="pkg">' + esc(t.source) + '</span> &rarr; <b>' + esc(t.relation) + '</b> &rarr; <span class="pkg">' + esc(t.target) + '</span>' +
+          (t.context ? ('<p>' + esc(t.context) + '</p>') : '') + '</div>';
+      }).join('');
+    } else {
+      tPanel.style.display = 'none';
+    }
+
+    var sPanel = $('ask-sources-panel');
+    if (d.sources && d.sources.length) {
+      sPanel.style.display = 'block';
+      $('ask-sources-body').innerHTML = d.sources.map(function (s) {
+        return '<div class="dep-item mono">' + esc(s.title || s.id) + '</div>';
+      }).join('');
+    } else {
+      sPanel.style.display = 'none';
+    }
+  }
+
+  $('form-ask').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var q = $('input-ask-question').value.trim();
+    if (!q) return;
+    askHydra(q, $('input-ask-repo').value.trim(), $('input-ask-package').value.trim());
+  });
+
+  function sendAskFeedback(rating) {
+    if (!lastAskRequestId) { showToast('Ask a question first.'); return; }
+    $('ask-feedback-up').classList.toggle('active', rating === 'positive');
+    $('ask-feedback-down').classList.toggle('active', rating === 'negative');
+    fetch('/api/ask/feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: lastAskRequestId, rating: rating }) })
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) { showToast(res.ok ? 'Feedback sent to HydraDB.' : (res.d.error || 'Feedback failed.')); })
+      .catch(function (err) { showToast('Feedback failed: ' + err); });
+  }
+  $('ask-feedback-up').addEventListener('click', function () { sendAskFeedback('positive'); });
+  $('ask-feedback-down').addEventListener('click', function () { sendAskFeedback('negative'); });
 
   // Debug/test hook only — not used by the app itself. Lets a test click a
   // graph node at its real rendered position instead of guessing pixel
