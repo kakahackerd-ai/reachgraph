@@ -124,7 +124,8 @@ type apiServer struct {
 	deps   *depsDevClient
 	osv    *osvClient
 	github *githubClient
-	guac   *guacClient // nil when GUAC persistence isn't configured (see guac.go)
+	guac   *guacClient    // nil when GUAC persistence isn't configured (see guac.go)
+	hydra  *hydraDBClient // nil when HYDRADB_API_KEY isn't set (see hydradb.go)
 }
 
 func main() {
@@ -144,6 +145,12 @@ func main() {
 	} else {
 		log.Printf("GUAC_GRAPHQL_URL not set — running Phase 0 style, without persistent graph storage")
 	}
+	if key := strings.TrimSpace(os.Getenv("HYDRADB_API_KEY")); key != "" {
+		srv.hydra = newHydraDBClient(key, os.Getenv("HYDRADB_DATABASE"))
+		log.Printf("HydraDB narrative timeline enabled")
+	} else {
+		log.Printf("HYDRADB_API_KEY not set — narrative timeline and code-context queries disabled")
+	}
 
 	webContent, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -154,6 +161,7 @@ func main() {
 	mux.HandleFunc("POST /api/scan", srv.handleScan)
 	mux.HandleFunc("POST /api/scan-repo", srv.handleScanRepo)
 	mux.HandleFunc("POST /api/expand", srv.handleExpand)
+	mux.HandleFunc("POST /api/ask", srv.handleAsk)
 	mux.HandleFunc("GET /api/repos", srv.handleListRepos)
 	mux.HandleFunc("GET /api/status", srv.handleStatus)
 	mux.Handle("/", http.FileServer(http.FS(webContent)))
@@ -174,7 +182,44 @@ func (s *apiServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"guacEnabled":        s.guac != nil,
 		"githubTokenPresent": strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) != "",
+		"hydradbEnabled":     s.hydra != nil,
 	})
+}
+
+type askRequest struct {
+	Question string `json:"question"`
+}
+
+// handleAsk is the natural-language surface over whatever's been narrated
+// into HydraDB: scan-timeline facts (see persistTimelineFacts) and, for
+// repos that have had their source ingested, code-structure facts (see
+// track_b.go). Answers are HydraDB's own ranked retrieval — presented as
+// "here's what looked most relevant," never as a guaranteed-complete
+// answer, because that's honestly what the underlying API gives back.
+func (s *apiServer) handleAsk(w http.ResponseWriter, r *http.Request) {
+	if s.hydra == nil {
+		writeError(w, http.StatusServiceUnavailable, "HYDRADB_API_KEY is not configured on this server")
+		return
+	}
+	var req askRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	req.Question = strings.TrimSpace(req.Question)
+	if req.Question == "" {
+		writeError(w, http.StatusBadRequest, "\"question\" is required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	result, err := s.hydra.query(ctx, req.Question)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 var supportedEcosystems = map[string]bool{"npm": true, "pypi": true}
@@ -404,6 +449,7 @@ func (s *apiServer) handleScan(w http.ResponseWriter, r *http.Request) {
 	resp.Subject.Version = version
 
 	s.persistToGUAC(context.WithoutCancel(ctx), resp.Subject.Name, g, paths)
+	s.persistTimelineFacts(ctx, "package", resp.Subject.Name, req.Ecosystem, start, paths)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -582,6 +628,7 @@ func (s *apiServer) handleScanRepo(w http.ResponseWriter, r *http.Request) {
 	resp.Dependabot = s.fetchDependabotSummary(ctx, req.Owner, req.Repo)
 
 	s.persistToGUAC(context.WithoutCancel(ctx), resp.Subject.Name, g, paths)
+	s.persistTimelineFacts(ctx, "repository", resp.Subject.Name, req.Ecosystem, start, paths)
 	writeJSON(w, http.StatusOK, resp)
 }
 

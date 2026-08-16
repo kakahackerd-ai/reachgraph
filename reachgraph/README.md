@@ -20,7 +20,7 @@ multi-view dashboard — not a single demo page.
 |---|---|
 | Which internal services are transitively exposed? | The attack-path graph itself — exact BFS closure over the real dependency graph, not a sample |
 | Which version introduced the vulnerability? | Each finding carries the real OSV/GHSA advisory, including affected ranges |
-| Which applications resolved the compromised version while it was live? | GUAC persistence (`/api/repos`) tracks scanned repos over time; see "Temporal tracking" below |
+| Which applications resolved the compromised version while it was live? | GUAC persistence (`/api/repos`) tracks scanned repos over time; HydraDB's real narrative timeline (`POST /api/ask`) answers this as a natural-language query — see "HydraDB" below |
 | Which other packages share maintainers or infrastructure with it? | `sharedMaintainers` — real npm registry maintainer accounts, cross-referenced |
 | Are there likely typosquat packages nearby? | `typosquats` — real edit-distance check against known-popular package names |
 | What is the complete blast radius? | The graph traversal itself — deterministic, not approximate |
@@ -45,7 +45,62 @@ below) reinforced why that's the right call for anything that needs to be
 | 2 — multi-ecosystem (PyPI) | **Done.** See "Multi-ecosystem" below |
 | 2 — typosquat detection | **Done.** `typosquat.go` — real Damerau-Levenshtein distance, no embeddings |
 | 2 — shared-maintainer detection | **Done**, npm-only. `maintainers.go` — real registry data, honest about why PyPI isn't included |
+| Bonus (not in the implementation plan) — HydraDB narrative timeline & code-context query | **Partially done**, optional (needs `HYDRADB_API_KEY`). Scan-timeline narration is wired into every scan and queryable via `POST /api/ask`; code-structure narration is implemented and unit-tested but not yet called from any handler. See "HydraDB" below |
 | 1 — real-time watcher, auth | Not built. Still describes-only, in the implementation plan |
+
+## HydraDB
+
+An optional third integration alongside GUAC. Set `HYDRADB_API_KEY` (and
+optionally `HYDRADB_DATABASE`) and the server narrates real events into
+HydraDB as natural-language facts, then exposes `POST /api/ask` — a
+free-text question over everything narrated so far, answered by HydraDB's
+own ranked-retrieval query API. `GET /api/status` reports `hydradbEnabled`.
+
+**What the real API actually looks like** — confirmed against the live
+service during development, not assumed from docs (see `hydradb.go`):
+`POST /context/ingest` is `multipart/form-data` — a `database` field plus
+an `app_knowledge` field carrying a JSON array of `{title, content: {text}}`
+objects — not the JSON body the documented shape implied, and not a
+pre-formed `{subject,predicate,object}` triplet either; HydraDB extracts
+its own entities and relations from the text via its own pipeline, and a
+bare triplet array is silently accepted but produces nothing useful.
+Ingestion is asynchronous, polled via `GET /context/status` until
+`indexing_status` is `completed`. `POST /query` takes `{database, query,
+type, graph_context}` as a JSON body and returns relevancy-scored
+`query_paths` — ranked retrieval, not a guaranteed-complete traversal.
+
+Two real features are built on this:
+
+- **Narrative timeline** (`timeline.go`) — every completed scan (single
+  package or repository, both `handleScan` and `handleScanRepo`) narrates
+  its flagged findings as timestamped facts ("At 2026-08-16T..., repository
+  lodash/lodash resolved dependency minimist to version 1.2.5, flagged
+  CRITICAL..."), giving `/api/ask` a real answer to Track 02's "which
+  applications resolved the compromised version while it was live" —
+  HydraDB's own headline feature (git-style temporal versioning) applied
+  directly to the blast-radius problem. Fire-and-forget, like GUAC
+  persistence: a slow or unreachable HydraDB never holds up the scan
+  response.
+- **Code-context graph** (`codegraph.go`) — regex-based extraction of real
+  function/class definitions and imports from a repo's own source (separate
+  JS/TS and Python patterns), meant to be narrated into HydraDB so
+  `/api/ask` could answer "where is X defined" / "what imports Y" with
+  graph-relevant answers instead of top-k similar-looking chunks from a
+  plain vector index — HydraDB's own stated designed purpose (a context
+  graph for AI agents), unlike the timeline feature, which uses it slightly
+  against the grain. **Honest gap:** `indexCodeGraph` is implemented and
+  covered by `codegraph_test.go` (JS and Python extraction both pinned
+  down), but no handler calls it yet, so no code-graph facts are actually
+  ingested by the running server today — `/api/ask` currently only has
+  timeline facts to draw on.
+
+**Why typosquat detection doesn't use this:** the Track 02 typosquat check
+(`typosquat.go`) needs an exact answer — is this string within edit
+distance N of a known-popular name — and HydraDB's `/query` is ranked,
+relevancy-scored retrieval, not a guaranteed-complete result set. Real
+Damerau-Levenshtein edit distance gives an exact, complete answer for that
+class of problem instead; this was confirmed by actually exercising the
+live HydraDB query API during development, not assumed.
 
 ## Multi-ecosystem (PyPI)
 
@@ -263,3 +318,6 @@ POST /api/scan-repo  {"owner":"lodash","repo":"lodash"}
   invalid-token path (clear rejected-auth error, not a crash) were both
   tested for real; the "valid token, real alerts returned" path is written
   against GitHub's published, versioned schema but hasn't been run.
+- **HydraDB code-graph narration is not wired in.** `codegraph.go`'s
+  `indexCodeGraph` is implemented and unit-tested, but no handler invokes
+  it yet — see "HydraDB" above.
