@@ -1,2 +1,7 @@
 /reachgraph
 *.log
+setup/hydra-db-data/
+graphplatform/.venv/
+graphplatform/__pycache__/
+graphplatform/**/__pycache__/
+graphplatform/.pytest_cache/
