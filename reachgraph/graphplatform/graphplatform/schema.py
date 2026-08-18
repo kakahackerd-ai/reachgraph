@@ -107,6 +107,10 @@ def from_iso(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 # Sentinel used internally for RESOLVED_VERSION_AT.superseded_at when a
 # resolution is still current. The query engine's WHERE clause only supports
 # "boolean combinations of property comparisons" (verified by hand -- no
@@ -116,3 +120,4 @@ def from_iso(s: str | None) -> datetime | None:
 # write_service.py API boundary, so callers of this service never see the
 # sentinel -- only real code in write_service.py should ever reference it.
 OPEN_INTERVAL_SENTINEL = ""
+

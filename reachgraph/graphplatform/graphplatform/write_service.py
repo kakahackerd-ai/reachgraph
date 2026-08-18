@@ -69,6 +69,18 @@ hosted v2 RAG API used elsewhere in this repo's `hydradb.go`):
     to confirm the Bolt path actually changes read freshness. Flagged
     here rather than smoothed over, the same way this repo's `hydradb.go`
     flags its own unconfirmed corners.
+  - **No write statement may be followed by MATCH/RETURN/WITH, full stop**
+    -- verified by hand while adding phase-3 enrichment writes:
+    `MATCH (n:Package {key:$key}) SET n.prop = $val RETURN n.key` is
+    rejected with "mutation queries cannot continue with MATCH, RETURN, or
+    WITH after writes". This generalizes the node/relationship-upsert
+    split already described above (MERGE, then a separate SET, never one
+    statement) to *any* write, not just those two shapes -- a write is
+    always its own auto-commit statement with nothing chained after it.
+    `_annotate_node` below relies on this: it's a MATCH-scoped SET with no
+    RETURN, so it silently touches zero rows (a normal Cypher no-op, not
+    an error) if the key doesn't exist -- there's no cheap way to ask this
+    engine "did that SET find a node" in the same round trip.
 """
 
 from __future__ import annotations
@@ -193,6 +205,28 @@ class GraphWriteService:
             extra={"label": label, "key": key, "event_time": row["event_time"], "newly_created": created},
         )
         return created
+
+    def _annotate_node(self, label: str, key: str, properties: dict[str, Any]) -> None:
+        """Set additional properties on an existing node without touching
+        its core identity fields or timestamp discipline -- for enrichment
+        writes (phase 3: GUAC, Socket, ...) that annotate data an
+        upsert_* already created. Never creates a node: see the module
+        docstring on why this can't RETURN whether a match happened --
+        annotating a key that doesn't exist yet is a silent no-op, by
+        design (enrichment should never race ahead of ingestion).
+        """
+        if label not in schema.NODE_LABELS:
+            raise ValueError(f"unknown node label: {label!r}")
+        if not properties:
+            return
+        set_clauses = ", ".join(f"n.{prop} = ${prop}" for prop in properties)
+        self._run(
+            f"MATCH (n:{label} {{key: $key}}) SET {set_clauses}",
+            key=key,
+            write=True,
+            **properties,
+        )
+        log.info("graph write: node annotated", extra={"label": label, "key": key, "properties": list(properties)})
 
     def _read_node(
         self, label: str, key: str, fields: list[str], consistency: Consistency = "causal"
@@ -447,6 +481,19 @@ class GraphWriteService:
             ["key", "source", "advisory_id", "summary", "first_observed_at", "event_time"],
             consistency,
         )
+
+    # ====================================================================
+    # Node annotation (enrichment -- see _annotate_node)
+    # ====================================================================
+
+    def annotate_package(self, key: str, **properties: Any) -> None:
+        self._annotate_node(schema.PACKAGE, key, properties)
+
+    def annotate_version(self, key: str, **properties: Any) -> None:
+        self._annotate_node(schema.VERSION, key, properties)
+
+    def annotate_maintainer(self, key: str, **properties: Any) -> None:
+        self._annotate_node(schema.MAINTAINER, key, properties)
 
     # ====================================================================
     # Relationship writes

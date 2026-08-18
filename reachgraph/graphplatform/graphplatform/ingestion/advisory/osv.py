@@ -60,6 +60,22 @@ class OSVConnector:
             versions = entry.get("versions")
             if versions:
                 item["versions"] = versions
+            # OSV's own SEMVER range events frequently already state a
+            # boundary version directly (e.g. {"introduced": "4.0.0"},
+            # {"fixed": "4.17.21"}) -- phase 3's version-introduction
+            # detection uses this as the advisory-stated starting point to
+            # refine, not as ground truth on its own. Only the first
+            # SEMVER-type range is used; a vuln with multiple disjoint
+            # affected ranges is a real simplification this doesn't model.
+            for r in entry.get("ranges", []):
+                if r.get("type") != "SEMVER":
+                    continue
+                for event in r.get("events", []):
+                    if "introduced" in event and event["introduced"] != "0":
+                        item["introduced"] = event["introduced"]
+                    elif "fixed" in event:
+                        item["fixed"] = event["fixed"]
+                break
             affected.append(item)
         return AdvisoryPublished(
             source=self.name,

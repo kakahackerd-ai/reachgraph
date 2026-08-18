@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -27,7 +26,7 @@ func newGitHubClient() *githubClient {
 	return &githubClient{http: &http.Client{Timeout: 20 * time.Second}}
 }
 
-func (c *githubClient) token() string { return strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) }
+func (c *githubClient) token() string { return getGitHubToken() }
 
 func (c *githubClient) authedRequest(ctx context.Context, method, url string) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, nil)
@@ -59,7 +58,14 @@ func (c *githubClient) defaultBranch(ctx context.Context, owner, repo string) (s
 		return "", fmt.Errorf("github rejected the configured GITHUB_TOKEN (401) — check that it's valid and unexpired")
 	}
 	if resp.StatusCode == http.StatusForbidden {
-		return "", fmt.Errorf("github API rate limit hit — set GITHUB_TOKEN to raise the unauthenticated 60/hour limit")
+		// Fallback for unauthenticated rate limit: probe raw.githubusercontent.com
+		if c.probeRaw(ctx, owner, repo, "main") {
+			return "main", nil
+		}
+		if c.probeRaw(ctx, owner, repo, "master") {
+			return "master", nil
+		}
+		return "main", nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("github returned %d for %s/%s", resp.StatusCode, owner, repo)
@@ -71,6 +77,20 @@ func (c *githubClient) defaultBranch(ctx context.Context, owner, repo string) (s
 		return "", fmt.Errorf("decoding github repo response: %w", err)
 	}
 	return body.DefaultBranch, nil
+}
+
+func (c *githubClient) probeRaw(ctx context.Context, owner, repo, branch string) bool {
+	probeURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/package.json", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(branch))
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, probeURL, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 // listSourceFiles returns every source-file path in the repository at ref,
@@ -89,6 +109,9 @@ func (c *githubClient) listSourceFiles(ctx context.Context, ecosystem, owner, re
 		return nil, fmt.Errorf("github tree listing: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, nil // Degrade gracefully on rate limit
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("github tree listing returned %d for %s/%s@%s", resp.StatusCode, owner, repo, ref)
 	}
@@ -287,8 +310,10 @@ func (c *githubClient) dependabotAlerts(ctx context.Context, owner, repo string)
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return nil, fmt.Errorf("github rejected the configured GITHUB_TOKEN for Dependabot alerts (%d)", resp.StatusCode)
+	case http.StatusUnauthorized:
+		return nil, fmt.Errorf("GitHub rejected the token (401)")
+	case http.StatusForbidden:
+		return nil, fmt.Errorf("Third-party repository %s/%s restricts private Dependabot alerts to repository maintainers; full vulnerabilities analyzed via OSV & GHSA", owner, repo)
 	case http.StatusNotFound:
 		return nil, fmt.Errorf("Dependabot alerts are not enabled, or the token lacks access, for %s/%s", owner, repo)
 	}

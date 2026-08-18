@@ -94,6 +94,10 @@ class PyPIConnector:
             dependencies=_parse_requires_dist(info.get("requires_dist")),
             maintainer_identity=info.get("author_email") or info.get("author") or info.get("maintainer_email"),
             maintainer_platform="pypi",
+            # PyPI's JSON API has no equivalent to npm's scripts field --
+            # a real ecosystem gap, not an oversight; has_install_script
+            # stays at its False default for every pypi event.
+            content_hash=(release_files[0].get("digests") or {}).get("sha256") if release_files else None,
             source=self.name,
         )
 

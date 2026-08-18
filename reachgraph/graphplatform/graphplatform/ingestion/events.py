@@ -26,6 +26,9 @@ class PackageVersionPublished:
     dependencies: dict[str, str] = field(default_factory=dict)  # name -> range
     maintainer_identity: str | None = None
     maintainer_platform: str | None = None
+    has_install_script: bool = False  # real signal (npm scripts.preinstall/install/postinstall); always False for pypi -- see registry/pypi.py
+    content_hash: str | None = None  # real, when the registry exposes one (npm dist.shasum, pypi digests.sha256)
+    signing_keyid: str | None = None  # real npm registry signing key id (dist.signatures[0].keyid); no pypi equivalent captured here
     source: str = ""  # connector name, for logging/debugging
     type: str = field(default="package_version_published", init=False)
 

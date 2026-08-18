@@ -17,7 +17,10 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -145,12 +148,9 @@ func main() {
 	} else {
 		log.Printf("GUAC_GRAPHQL_URL not set — running Phase 0 style, without persistent graph storage")
 	}
-	if key := strings.TrimSpace(os.Getenv("HYDRADB_API_KEY")); key != "" {
-		srv.hydra = newHydraDBClient(key, os.Getenv("HYDRADB_DATABASE"))
-		log.Printf("HydraDB narrative timeline enabled")
-	} else {
-		log.Printf("HYDRADB_API_KEY not set — narrative timeline and code-context queries disabled")
-	}
+	// Initialize Local HydraDB Engine
+	srv.hydra = newHydraDBClient(os.Getenv("HYDRADB_API_KEY"), os.Getenv("HYDRADB_DATABASE"))
+	log.Printf("HydraDB Local Engine enabled on %s (Namespace: %s)", srv.hydra.base, srv.hydra.database)
 
 	webContent, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -158,6 +158,16 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+
+	pythonAddr := os.Getenv("GRAPHPLATFORM_API_URL")
+	if pythonAddr == "" {
+		pythonAddr = "http://127.0.0.1:8081"
+	}
+	if pURL, err := url.Parse(pythonAddr); err == nil {
+		v2Proxy := httputil.NewSingleHostReverseProxy(pURL)
+		mux.Handle("/api/v2/", v2Proxy)
+	}
+
 	mux.HandleFunc("POST /api/scan", srv.handleScan)
 	mux.HandleFunc("POST /api/scan-repo", srv.handleScanRepo)
 	mux.HandleFunc("POST /api/expand", srv.handleExpand)
@@ -180,10 +190,27 @@ func logRequests(next http.Handler) http.Handler {
 	})
 }
 
+func getGitHubToken() string {
+	if t := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); t != "" {
+		return t
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "gh", "auth", "token").Output()
+	if err == nil {
+		token := strings.TrimSpace(string(out))
+		if token != "" {
+			_ = os.Setenv("GITHUB_TOKEN", token)
+			return token
+		}
+	}
+	return ""
+}
+
 func (s *apiServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]any{
 		"guacEnabled":        s.guac != nil,
-		"githubTokenPresent": strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) != "",
+		"githubTokenPresent": getGitHubToken() != "",
 		"hydradbEnabled":     s.hydra != nil,
 	}
 	if s.hydra != nil {
@@ -476,6 +503,7 @@ func (s *apiServer) applyReachability(ctx context.Context, ecosystem, owner, rep
 type scanRequest struct {
 	Ecosystem string `json:"ecosystem"`
 	Package   string `json:"package"`
+	Name      string `json:"name"`
 	Version   string `json:"version"` // optional; resolved against the registry if empty
 }
 
@@ -488,6 +516,9 @@ func (s *apiServer) handleScan(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
+	}
+	if req.Package == "" {
+		req.Package = req.Name
 	}
 	req.Package = strings.TrimSpace(req.Package)
 	if req.Package == "" {
@@ -548,6 +579,7 @@ func (s *apiServer) handleScan(w http.ResponseWriter, r *http.Request) {
 
 type scanRepoRequest struct {
 	Owner     string `json:"owner"`
+	Org       string `json:"org"`
 	Repo      string `json:"repo"`
 	Ref       string `json:"ref"`       // optional; default branch is used when empty
 	Ecosystem string `json:"ecosystem"` // optional; "npm" (default) or "pypi"
@@ -569,6 +601,9 @@ func (s *apiServer) handleScanRepo(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
+	}
+	if req.Owner == "" {
+		req.Owner = req.Org
 	}
 	req.Owner = strings.TrimSpace(req.Owner)
 	req.Repo = strings.TrimSpace(req.Repo)

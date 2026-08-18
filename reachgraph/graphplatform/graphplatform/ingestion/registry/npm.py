@@ -87,6 +87,9 @@ class NpmConnector:
                 # than fabricate one with "now".
                 continue
             npm_user = vdoc.get("_npmUser") or (top_maintainers[0] if top_maintainers else {})
+            scripts = vdoc.get("scripts") or {}
+            dist = vdoc.get("dist") or {}
+            signatures = dist.get("signatures") or []
             yield PackageVersionPublished(
                 ecosystem="npm",
                 package_name=name,
@@ -95,6 +98,9 @@ class NpmConnector:
                 dependencies=dict(vdoc.get("dependencies") or {}),
                 maintainer_identity=npm_user.get("email") or npm_user.get("name"),
                 maintainer_platform="npm",
+                has_install_script=any(k in scripts for k in ("preinstall", "install", "postinstall")),
+                content_hash=dist.get("shasum"),
+                signing_keyid=signatures[0].get("keyid") if signatures else None,
                 source=self.name,
             )
 
@@ -107,7 +113,7 @@ class NpmConnector:
             yield from self._events_from_doc(doc)
 
     def fetch_or_subscribe(
-        self, *, since: int = 0, max_iterations: int | None = None
+        self, *, since: int = 0, limit: int = 10, max_iterations: int | None = None
     ) -> Iterator[PackageVersionPublished]:
         """self.last_seq tracks the highest change seq processed so far --
         callers that need to resume across a process restart should persist
@@ -117,7 +123,7 @@ class NpmConnector:
         iterations = 0
         while max_iterations is None or iterations < max_iterations:
             iterations += 1
-            resp = self._http.get(CHANGES_URL, params={"since": self.last_seq, "limit": 100})
+            resp = self._http.get(CHANGES_URL, params={"since": self.last_seq, "limit": limit})
             resp.raise_for_status()
             results = resp.json().get("results", [])
             if not results:

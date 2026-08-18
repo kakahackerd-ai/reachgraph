@@ -70,6 +70,30 @@ def test_upsert_package_roundtrip_and_idempotent(service, cleanup, run_id):
     assert got2["first_observed_at"] == schema.to_iso(T0)  # set once, never overwritten
 
 
+def test_annotate_package_sets_properties_without_touching_core_fields(service, cleanup, run_id):
+    key = f"npm:test-pkg-{run_id}"
+    cleanup(schema.PACKAGE, key)
+    service.upsert_package(key, "npm", "test-pkg", first_observed_at=T0, event_time=T0)
+
+    service.annotate_package(key, socket_score=0.42, socket_scored_at="2024-01-01T00:00:00Z")
+    got = service.get_package(key, consistency="strong")
+    assert got["ecosystem"] == "npm"  # untouched
+    assert got["first_observed_at"] == schema.to_iso(T0)  # untouched
+
+    row = service._run(
+        "MATCH (n:Package {key:$key}) RETURN n.socket_score AS score, n.socket_scored_at AS scored_at",
+        key=key,
+        consistency="strong",
+    )[0]
+    assert row == {"score": 0.42, "scored_at": "2024-01-01T00:00:00Z"}
+
+
+def test_annotate_package_on_missing_key_is_a_silent_noop(service, run_id):
+    key = f"npm:does-not-exist-{run_id}"
+    service.annotate_package(key, socket_score=0.9)  # must not raise
+    assert service.get_package(key, consistency="strong") is None
+
+
 def test_upsert_version_roundtrip_and_idempotent(service, cleanup, run_id):
     pkg_key = f"npm:test-pkg-{run_id}"
     ver_key = f"npm:test-pkg-{run_id}@1.0.0"

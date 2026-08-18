@@ -47,7 +47,15 @@ class GHSAConnector:
         token: str | None = None,
         poll_interval_s: float = 60.0,
     ) -> None:
-        token = token if token is not None else os.environ.get("GITHUB_TOKEN")
+        if token is None:
+            token = os.environ.get("GITHUB_TOKEN")
+        if not token:
+            try:
+                import subprocess
+                token = subprocess.check_output(["gh", "auth", "token"], text=True, timeout=2).strip()
+            except Exception:
+                token = None
+        self._token = token
         headers = {"Accept": "application/vnd.github+json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -61,7 +69,19 @@ class GHSAConnector:
             pkg = v.get("package") or {}
             if not pkg.get("name"):
                 continue
-            affected.append({"ecosystem": pkg.get("ecosystem", ""), "package_name": pkg["name"]})
+            item: dict[str, object] = {"ecosystem": pkg.get("ecosystem", ""), "package_name": pkg["name"]}
+            # GHSA gives a raw range string ("<= 5.1.5"), not a clean
+            # "introduced" boundary version like OSV's SEMVER events --
+            # passed through as-is under `range` for phase 3's
+            # version-introduction detection to interpret; `fixed` (when
+            # present) is a real, unambiguous boundary.
+            vuln_range = v.get("vulnerable_version_range")
+            if vuln_range:
+                item["range"] = vuln_range
+            fixed = v.get("first_patched_version")
+            if fixed:
+                item["fixed"] = fixed
+            affected.append(item)
         return AdvisoryPublished(
             source=self.name,
             advisory_id=adv["ghsa_id"],
@@ -76,6 +96,9 @@ class GHSAConnector:
         next_params: dict | None = params
         while url:
             resp = self._http.get(url, params=next_params)
+            if resp.status_code == 403:
+                log.warning("ghsa: github rate limit reached or token missing (HTTP 403)")
+                break
             resp.raise_for_status()
             yield resp.json()
             next_params = None  # the Link header's next URL already carries every param
