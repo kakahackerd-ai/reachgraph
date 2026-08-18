@@ -190,7 +190,7 @@ class GraphWriteService:
         )
         log.info(
             "graph write: node upserted",
-            extra={"label": label, "key": key, "event_time": row["event_time"], "created": created},
+            extra={"label": label, "key": key, "event_time": row["event_time"], "newly_created": created},
         )
         return created
 
@@ -292,7 +292,7 @@ class GraphWriteService:
                 "a_key": a_key,
                 "b_key": b_key,
                 "event_time": params["event_time"],
-                "created": created,
+                "newly_created": created,
             },
         )
         return created

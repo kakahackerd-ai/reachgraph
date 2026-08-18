@@ -8,10 +8,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from graphplatform import GraphWriteService  # noqa: E402
 from graphplatform import schema  # noqa: E402
+from graphplatform.ingestion.queue import RedisStreamQueue  # noqa: E402
+from graphplatform.ingestion.writer import GraphIngestionWriter  # noqa: E402
 
 HYDRA_URI = os.environ.get("HYDRADB_URI", "neo4j://127.0.0.1:7687")
 REPO_ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 DEFAULT_TOKEN_FILE = os.path.join(REPO_ROOT, "setup", "hydra-db-data", "auth-token")
+REDIS_URL = os.environ.get("GRAPHPLATFORM_REDIS_URL", "redis://127.0.0.1:6379/0")
 
 
 def _load_token() -> str:
@@ -33,6 +36,18 @@ def service():
     svc.verify_connectivity()
     yield svc
     svc.close()
+
+
+@pytest.fixture(scope="session")
+def writer(service):
+    return GraphIngestionWriter(service)
+
+
+@pytest.fixture()
+def queue():
+    q = RedisStreamQueue(REDIS_URL)
+    yield q
+    q.close()
 
 
 @pytest.fixture()

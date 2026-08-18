@@ -5,3 +5,4 @@ graphplatform/.venv/
 graphplatform/__pycache__/
 graphplatform/**/__pycache__/
 graphplatform/.pytest_cache/
+graphplatform/dump.rdb
