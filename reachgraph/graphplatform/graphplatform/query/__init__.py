@@ -1,4 +1,4 @@
-from .models import BlastRadiusNode, BlastRadiusResult, LiveResolutionResult, TransitiveExposureResult
+from .models import BlastRadiusNode, BlastRadiusResult, LiveResolutionResult, TransitiveExposureResult, blast_radius_to_graph
 from .service import QueryReasoningService
 
 __all__ = [
@@ -7,4 +7,5 @@ __all__ = [
     "LiveResolutionResult",
     "BlastRadiusNode",
     "BlastRadiusResult",
+    "blast_radius_to_graph",
 ]

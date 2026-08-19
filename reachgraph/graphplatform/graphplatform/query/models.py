@@ -91,3 +91,24 @@ class BlastRadiusResult:
                 for n in self.nodes
             ],
         }
+
+
+def blast_radius_to_graph(result: BlastRadiusResult) -> dict[str, Any]:
+    """Serialize a BlastRadiusResult to a plain {nodes, edges} graph for the
+    frontend's 3D renderer. BlastRadiusResult carries each node's full path
+    from the source but no edge list -- synthesize edges from consecutive
+    path elements, deduped.
+    """
+    nodes = [{"key": result.source_key, "label": "Package" if "@" not in result.source_key else "Version", "depth": 0}]
+    nodes += [{"key": n.key, "label": n.label, "depth": n.depth} for n in result.nodes if n.key != result.source_key]
+
+    edges: list[dict[str, str]] = []
+    seen_edges: set[tuple[str, str]] = set()
+    for n in result.nodes:
+        for a, b in zip(n.path, n.path[1:]):
+            if (a, b) in seen_edges:
+                continue
+            seen_edges.add((a, b))
+            edges.append({"source": a, "target": b})
+
+    return {"nodes": nodes, "edges": edges}

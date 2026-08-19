@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import time
 
 from graphplatform import schema
@@ -10,35 +9,39 @@ from graphplatform.product.lookup import PackageLookupService, RateLimiter
 from graphplatform.product.scanner import RepoScannerService
 from graphplatform.query.service import QueryReasoningService
 
-T0 = dt.datetime(2021, 1, 1, 12, 0, tzinfo=dt.timezone.utc)
 
-
-def test_package_lookup_verdict_caching_and_rate_limiting(service, cleanup, run_id):
-    pkg_key = f"npm:lookup-pkg-{run_id}"
-    ver_key = f"{pkg_key}@1.0.0"
-    cleanup(schema.PACKAGE, pkg_key)
-
-    service.upsert_package(pkg_key, "npm", f"lookup-pkg-{run_id}", first_observed_at=T0, event_time=T0)
-    service.upsert_version(ver_key, pkg_key, "1.0.0", first_observed_at=T0, event_time=T0)
-    service.annotate_package(pkg_key, socket_score=0.15)
+def test_package_lookup_real_dependents_caching_and_rate_limiting(service, cleanup, run_id):
+    # Real, small, stable npm package -- lookup() resolves metadata and
+    # scrapes GitHub's real network/dependents page, so this is a real
+    # network round trip, not a fixture.
+    pkg_key = "npm:is-number"
 
     query_svc = QueryReasoningService(service)
     limiter = RateLimiter(capacity=2.0, refill_rate=0.0)
     lookup_svc = PackageLookupService(query_svc, service, cache_ttl_s=10.0, rate_limiter=limiter)
 
     # 1. First lookup
-    res1 = lookup_svc.lookup("npm", f"lookup-pkg-{run_id}", "1.0.0", client_id="test-client")
+    res1 = lookup_svc.lookup("npm", "is-number", client_id=f"test-client-{run_id}", max_dependents=5)
     assert res1["status"] == "ok"
-    assert res1["package"] == f"lookup-pkg-{run_id}"
+    assert res1["package"]["ecosystem"] == "npm"
+    assert res1["package"]["name"] == "is-number"
+    assert res1["package"]["repository"] == "jonschlinkert/is-number"
     assert "blast_radius" in res1
+    assert "graph" in res1
+    assert res1["dependents"]["shown"] >= 1
 
-    # 2. Cached lookup
-    res2 = lookup_svc.lookup("npm", f"lookup-pkg-{run_id}", "1.0.0", client_id="test-client")
+    cleanup(schema.PACKAGE, pkg_key)
+    for node in res1["graph"]["nodes"]:
+        if node["label"] == schema.APPLICATION:
+            cleanup(schema.APPLICATION, node["key"])
+
+    # 2. Cached lookup -- must not re-hit the network or re-scrape
+    res2 = lookup_svc.lookup("npm", "is-number", client_id=f"test-client-{run_id}", max_dependents=5)
     assert res2["status"] == "ok"
     assert res2["cached_at"] == res1["cached_at"]
 
     # 3. Exhaust rate limiter
-    res_exceeded = lookup_svc.lookup("npm", f"lookup-pkg-{run_id}", "1.0.0", client_id="test-client")
+    res_exceeded = lookup_svc.lookup("npm", "is-number", client_id=f"test-client-{run_id}", max_dependents=5)
     assert res_exceeded.get("error") == "rate_limit_exceeded"
 
 

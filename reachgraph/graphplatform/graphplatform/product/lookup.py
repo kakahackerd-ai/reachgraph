@@ -1,9 +1,12 @@
 """Package Lookup Service.
 
-Public package lookup surface with in-memory caching, token-bucket rate
-limiting, and on-demand async fetching for unindexed packages. Blast-radius
-dependents (who depends on this package) are populated separately by the
-GitHub dependents scrape module -- see ingestion/dependents/github_scrape.py.
+Public package lookup surface for Flow 1 (npm/PyPI package blast radius):
+resolve the package's registry metadata and GitHub source repo, scrape its
+real dependents off GitHub's network/dependents page, write them into
+HydraDB as Application-[:DEPENDS_ON]->Package edges, and compute the
+resulting blast radius. In-memory caching and token-bucket rate limiting
+guard the whole thing since both the scrape and the graph write happen
+synchronously within the request.
 """
 
 from __future__ import annotations
@@ -12,11 +15,14 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
+from .. import schema
+from ..ingestion.dependents.github_scrape import fetch_dependent_counts, fetch_dependents, fetch_package_metadata
 from ..ingestion.registry.npm import NpmConnector
 from ..ingestion.registry.pypi import PyPIConnector
+from ..query.models import blast_radius_to_graph
 from ..query.service import QueryReasoningService
 from ..write_service import GraphWriteService
 
@@ -82,7 +88,7 @@ class PackageLookupService:
         version: str | None = None,
         *,
         client_id: str = "default",
-        trigger_fetch_if_missing: bool = True,
+        max_dependents: int = 100,
     ) -> dict[str, Any]:
         # 1. Rate limiting check
         if not self.rate_limiter.acquire(client_id):
@@ -94,8 +100,7 @@ class PackageLookupService:
 
         eco = "pypi" if ecosystem.lower() in ("pypi", "python") else "npm"
         pkg_key = f"{eco}:{name}"
-        target_key = f"{pkg_key}@{version}" if version else pkg_key
-        cache_key = f"{target_key}"
+        cache_key = f"{pkg_key}@{version}" if version else pkg_key
 
         # 2. Check cache
         with self._lock:
@@ -104,33 +109,58 @@ class PackageLookupService:
                 if time.time() - ts < self.cache_ttl_s:
                     return cached_data
 
-        # 3. Check if package exists in graph
-        pkg_data = self.write_service.get_package(pkg_key, consistency="causal")
-        if pkg_data is None and trigger_fetch_if_missing:
-            # Trigger asynchronous on-demand fetch
-            self._trigger_on_demand_fetch(eco, name)
-            return {
-                "status": "processing",
-                "message": f"Package {pkg_key} is not yet indexed; background ingestion triggered. Check back shortly.",
-                "package": name,
-                "ecosystem": eco,
-                "version": version,
-            }
+        # 3. Resolve registry metadata + GitHub source repo (one HTTP round trip)
+        meta = fetch_package_metadata(eco, name)
+        if meta is None:
+            return {"status": "error", "error": "package_not_found", "package": name, "ecosystem": eco}
+        resolved_version = version or meta.latest_version
 
-        # 4. Transitive exposure + blast radius over whatever DEPENDS_ON/
-        # RESOLVED_VERSION_AT edges are already in the graph.
-        exposures = [exp.to_dict() for exp in self.query_service.transitive_exposure(target_key, consistency="causal")]
-        blast = self.query_service.blast_radius(target_key, consistency="causal").to_dict()
+        now = datetime.now(timezone.utc)
+        already_known = self.write_service.get_package(pkg_key, consistency="causal") is not None
+        self.write_service.upsert_package(pkg_key, eco, name, first_observed_at=now, event_time=now)
+        if not already_known:
+            # Best-effort enrichment of the package's own metadata/forward
+            # deps; doesn't gate this response, which only needs pkg_key to
+            # exist (just upserted above).
+            self._trigger_on_demand_fetch(eco, name)
+
+        # 4. Scrape real dependents off GitHub and write them into the graph
+        # as Application-[:DEPENDS_ON]->Package edges.
+        dependents = {"shown": 0, "known_total": None, "direct_known": None, "indirect_known": None}
+        if meta.source_repo:
+            owner, repo = meta.source_repo
+            page = fetch_dependents(owner, repo, max_items=max_dependents)
+            for dep in page.dependents:
+                app_key = dep.key
+                self.write_service.upsert_application(app_key, dep.owner, dep.repo, first_observed_at=now, event_time=now)
+                self.write_service.write_depends_on(
+                    schema.APPLICATION, app_key, pkg_key, "*", "github-dependents-scrape",
+                    first_observed_at=now, event_time=now,
+                )
+            dependents["shown"] = page.shown
+            if resolved_version:
+                counts = fetch_dependent_counts(eco, name, resolved_version)
+                if counts:
+                    dependents["known_total"] = counts.get("dependentCount")
+                    dependents["direct_known"] = counts.get("directDependentCount")
+                    dependents["indirect_known"] = counts.get("indirectDependentCount")
+
+        # 5. Blast radius outward from the package, now that its real
+        # dependents (if any were found) are in the graph.
+        blast = self.query_service.blast_radius(pkg_key, consistency="strong")
 
         result = {
             "status": "ok",
-            "package": name,
-            "ecosystem": eco,
-            "version": version,
-            "target_key": target_key,
-            "transitive_exposures": exposures,
-            "blast_radius": blast,
-            "cached_at": datetime.now().isoformat(),
+            "package": {
+                "ecosystem": eco,
+                "name": name,
+                "version": resolved_version,
+                "repository": f"{meta.source_repo[0]}/{meta.source_repo[1]}" if meta.source_repo else None,
+            },
+            "dependents": dependents,
+            "graph": blast_radius_to_graph(blast),
+            "blast_radius": blast.to_dict(),
+            "cached_at": datetime.now(timezone.utc).isoformat(),
         }
 
         # Cache result

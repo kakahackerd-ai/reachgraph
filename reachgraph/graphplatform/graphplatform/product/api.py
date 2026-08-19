@@ -126,12 +126,14 @@ class ProductAPIHandler(BaseHTTPRequestHandler):
             eco = body.get("ecosystem", "npm")
             name = body.get("package") or body.get("name", "")
             ver = body.get("version")
+            max_dependents = int(body.get("max_dependents", 100))
             if not name:
                 self._send_json(400, {"error": "package is required"})
                 return
             client_ip = self.client_address[0] if self.client_address else "local"
-            res = l_svc.lookup(eco, name, ver, client_id=client_ip)
-            self._send_json(200 if "error" not in res else 429, res)
+            res = l_svc.lookup(eco, name, ver, client_id=client_ip, max_dependents=max_dependents)
+            status = 429 if res.get("error") == "rate_limit_exceeded" else 404 if res.get("error") == "package_not_found" else 200
+            self._send_json(status, res)
             return
 
         # 2. Repo Scan Job Submission
