@@ -86,6 +86,7 @@ hosted v2 RAG API used elsewhere in this repo's `hydradb.go`):
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from typing import Any
 
@@ -165,12 +166,38 @@ class GraphWriteService:
         if consistency not in ("causal", "strong"):
             raise ValueError(f"invalid consistency: {consistency!r} (must be 'causal' or 'strong')")
         query = neo4j.Query(cypher, metadata={"consistency": consistency})
-        try:
-            with self._driver.session(database=self._database) as session:
-                result = session.run(query, params)
-                records = [dict(r) for r in result]
-        except Exception as exc:
-            if _WRITE_CEILING_SIGNATURE in str(exc):
+
+        # This exact error string covers two situations the client can't
+        # tell apart in advance: the documented permanent write-volume
+        # ceiling (retrying never helps), and a brief internal
+        # writer-lease recovery cycle observed by hand under sustained
+        # write load -- the container's own logs show a clean "db closed"
+        # / "starting graph node" pair with no external trigger (no
+        # healthcheck, no restart policy, no memory limit configured) a
+        # few seconds around the failure, after which it's healthy again.
+        # One short retry is cheap insurance for the second case and costs
+        # nothing but a brief delay in the first, where it will just fail
+        # the same way again and still surface the clear error below.
+        for attempt in range(2):
+            try:
+                with self._driver.session(database=self._database) as session:
+                    result = session.run(query, params)
+                    records = [dict(r) for r in result]
+                break
+            except Exception as exc:
+                if _WRITE_CEILING_SIGNATURE not in str(exc):
+                    log.exception(
+                        "hydradb query failed",
+                        extra={"cypher": cypher, "write": write, "consistency": consistency},
+                    )
+                    raise
+                if attempt == 0:
+                    log.warning(
+                        "hydradb hit the write-ceiling signature -- retrying once after a short delay",
+                        extra={"write": write, "consistency": consistency},
+                    )
+                    time.sleep(3)
+                    continue
                 log.error(
                     "hydradb local write-volume ceiling exceeded -- store needs a wipe+restart, see README",
                     extra={"write": write, "consistency": consistency},
@@ -178,13 +205,8 @@ class GraphWriteService:
                 raise HydraDBWriteCeilingExceeded(
                     "HydraDB's local store has hit its permanent write-volume ceiling for this backend "
                     "(see graphplatform/README.md's Known limitations) and needs to be wiped and restarted "
-                    "by an operator -- this is not a transient error and retrying will not help."
+                    "by an operator -- retried once and it did not recover."
                 ) from exc
-            log.exception(
-                "hydradb query failed",
-                extra={"cypher": cypher, "write": write, "consistency": consistency},
-            )
-            raise
         log.debug(
             "hydradb query ok",
             extra={"cypher": cypher, "write": write, "consistency": consistency, "rows": len(records)},

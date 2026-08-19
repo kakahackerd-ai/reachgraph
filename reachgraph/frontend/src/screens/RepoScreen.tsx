@@ -159,6 +159,24 @@ export default function RepoScreen() {
                 )}
               </div>
             )}
+
+            {selectedOption && (() => {
+              const extra = selectedOption.locally_affected_files.filter(
+                (p) => !selectedOption.importing_files.includes(p),
+              )
+              return extra.length > 0 ? (
+                <div className="field-group">
+                  <span className="field-label">Also reachable via local calls (gitnexus)</span>
+                  <div className="dep-list">
+                    {extra.map((path) => (
+                      <div key={path} className="dep-item" style={{ cursor: 'default' }}>
+                        <span className="name">{path}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null
+            })()}
           </>
         )}
       </aside>

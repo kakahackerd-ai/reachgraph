@@ -20,6 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from ..ingestion.codegraph.gitnexus_client import (
+    GitNexusUnavailable,
+    LocalImportEdge,
+    local_file_import_graph,
+    locally_reachable_files,
+    run_analyze,
+)
 from ..ingestion.codegraph.import_scan import scan_directory_for_imports
 from ..ingestion.manifest.service import discover_and_ingest
 from ..query.service import QueryReasoningService
@@ -193,6 +200,23 @@ class RepoScannerService:
                 self.write_service.write_contains_batch_merge_only(contains_rows)
                 self.write_service.write_imports_batch_merge_only(imports_rows)
 
+            # 1c. gitnexus: real local (intra-repo) file import/call graph,
+            # used to extend "these files directly import package X" into
+            # "these files are reachable from an importer of X through the
+            # repo's own local call chain" -- e.g. a file that doesn't
+            # import X itself but imports a file that does. Best-effort:
+            # gitnexus is an external tool (network install on first run,
+            # real subprocess execution) and its absence or failure
+            # shouldn't fail the whole scan, only skip this one enrichment.
+            local_edges: list[LocalImportEdge] = []
+            if file_rows:
+                job.progress = "Running gitnexus for local file/call graph..."
+                try:
+                    run_analyze(local_path)
+                    local_edges = local_file_import_graph(local_path)
+                except GitNexusUnavailable as exc:
+                    log.warning("gitnexus enrichment skipped", extra={"reason": str(exc)})
+
             # 2. For each discovered dependency, compute its in-repo blast radius
             job.progress = "Computing in-repo blast radius per dependency..."
             total_deps = 0
@@ -221,7 +245,16 @@ class RepoScannerService:
                     if app_key_for(s) in blast.applications
                 ]
                 pkg_key = f"{sub.ecosystem}:{pkg_name}"
-                importing_files = sorted(importers_by_package.get(pkg_key, ()))
+                importing_files = importers_by_package.get(pkg_key, set())
+                # gitnexus's local file-import graph extends direct
+                # importers into everything that transitively reaches this
+                # dependency through the repo's own local call chain --
+                # e.g. a file that doesn't import X itself but imports a
+                # file that does. Falls back to just the direct importers
+                # when gitnexus enrichment was skipped (local_edges empty).
+                locally_affected = (
+                    locally_reachable_files(importing_files, local_edges) if importing_files else set()
+                )
                 return {
                     "package_key": pkg_key,
                     "name": pkg_name,
@@ -229,8 +262,10 @@ class RepoScannerService:
                     "subpath": sub.subpath or "(root)",
                     "in_repo_blast_radius": in_repo_affected,
                     "total_blast_reach": blast.total_reached,
-                    "importing_files": importing_files,
+                    "importing_files": sorted(importing_files),
                     "importing_files_count": len(importing_files),
+                    "locally_affected_files": sorted(locally_affected),
+                    "locally_affected_files_count": len(locally_affected),
                 }
 
             with ThreadPoolExecutor(max_workers=_BLAST_RADIUS_CONCURRENCY) as pool:

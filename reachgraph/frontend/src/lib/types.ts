@@ -79,6 +79,8 @@ export interface DependencyOption {
   total_blast_reach: number
   importing_files: string[]
   importing_files_count: number
+  locally_affected_files: string[]
+  locally_affected_files_count: number
 }
 
 export interface ScanResult {
