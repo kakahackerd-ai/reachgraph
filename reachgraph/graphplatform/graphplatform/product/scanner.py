@@ -1,8 +1,8 @@
-"""GitHub Repository Scanner Service -- Phase 6.
+"""GitHub Repository Scanner Service.
 
-Provides asynchronous background repository scanning (monorepo & workspace aware),
-persisting Application & RESOLVED_VERSION_AT edges to HydraDB and computing
-in-repo blast radius and risk reports.
+Provides asynchronous background repository scanning (monorepo & workspace
+aware), persisting Application & RESOLVED_VERSION_AT edges to HydraDB and
+computing an in-repo blast-radius report per discovered dependency.
 """
 
 from __future__ import annotations
@@ -133,12 +133,10 @@ class RepoScannerService:
             job.progress = "Ingesting repository workspaces into HydraDB..."
             disc_res = discover_and_ingest(local_path, org=org, repo=repo, write_service=self.write_service)
 
-            # 2. For each discovered member, query exposure and risk
-            job.progress = "Evaluating supply chain risk and in-repo blast radius..."
+            # 2. For each discovered dependency, compute its in-repo blast radius
+            job.progress = "Computing in-repo blast radius per dependency..."
             total_deps = 0
-            flagged_deps: list[dict[str, Any]] = []
-            typosquats_detected: list[dict[str, Any]] = []
-            predicted_risks: list[dict[str, Any]] = []
+            dependency_options: list[dict[str, Any]] = []
             all_resolved_pkgs: set[str] = set()
 
             def app_key_for(sub: Any) -> str:
@@ -150,50 +148,28 @@ class RepoScannerService:
             ]
 
             for sub in disc_res.sub_packages:
-                sub_app_key = app_key_for(sub)
                 for pkg_name, ver in sub.resolved.items():
                     total_deps += 1
                     pkg_key = f"{sub.ecosystem}:{pkg_name}"
                     ver_key = f"{sub.ecosystem}:{pkg_name}@{ver}"
+                    if pkg_key in all_resolved_pkgs:
+                        continue
                     all_resolved_pkgs.add(pkg_key)
 
-                    # Query advisories for this version
-                    advs = self.write_service.get_advisories_for("Version", ver_key, consistency="causal")
-                    pkg_advs = self.write_service.get_advisories_for("Package", pkg_key, consistency="causal")
-                    all_adv = list({a["advisory_key"]: a for a in (advs + pkg_advs)}.values())
-
-                    if all_adv:
-                        blast = self.query_service.blast_radius(ver_key, consistency="causal")
-                        # Check which of the repo's own sub-packages are affected
-                        in_repo_affected = [
-                            s.subpath or "(root)"
-                            for s in disc_res.sub_packages
-                            if app_key_for(s) in blast.applications
-                        ]
-                        flagged_deps.append({
-                            "package": pkg_name,
-                            "version": ver,
-                            "version_key": ver_key,
-                            "subpath": sub.subpath or "(root)",
-                            "advisories": all_adv,
-                            "in_repo_blast_radius": in_repo_affected,
-                            "total_blast_reach": blast.total_reached,
-                        })
-
-                    # Typosquat check
-                    typos = self.query_service.nearby_typosquats(pkg_key, consistency="causal")
-                    for t in typos:
-                        typosquats_detected.append({
-                            "package": pkg_name,
-                            "similar_to": t.popular_target,
-                            "score": t.similarity_score,
-                            "method": t.method,
-                        })
-
-                    # Early warning prediction
-                    early = self.query_service.predict_early_warning(pkg_key, write_to_graph=False, consistency="causal")
-                    if early.risk_score >= 0.4:
-                        predicted_risks.append(early.to_dict())
+                    blast = self.query_service.blast_radius(ver_key, consistency="causal")
+                    in_repo_affected = [
+                        s.subpath or "(root)"
+                        for s in disc_res.sub_packages
+                        if app_key_for(s) in blast.applications
+                    ]
+                    dependency_options.append({
+                        "package_key": pkg_key,
+                        "name": pkg_name,
+                        "ecosystem": sub.ecosystem,
+                        "subpath": sub.subpath or "(root)",
+                        "in_repo_blast_radius": in_repo_affected,
+                        "total_blast_reach": blast.total_reached,
+                    })
 
             report = {
                 "org": org,
@@ -202,10 +178,7 @@ class RepoScannerService:
                 "discovered_applications": discovered_apps,
                 "total_dependencies_scanned": total_deps,
                 "unique_packages": len(all_resolved_pkgs),
-                "flagged_dependencies": flagged_deps,
-                "flagged_count": len(flagged_deps),
-                "typosquats_detected": typosquats_detected,
-                "predicted_risks": predicted_risks,
+                "dependency_options": dependency_options,
                 "scanned_at": datetime.now().isoformat(),
             }
 

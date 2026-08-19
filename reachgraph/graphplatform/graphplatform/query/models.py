@@ -1,7 +1,8 @@
-"""Phase 4 Query & Reasoning Data Models.
+"""Query & Reasoning Data Models.
 
-Defines the structured representations for answering the six core supply-chain
-questions, predictive cascade forecasting, and chained-vulnerability analysis.
+Structured representations for the blast-radius-oriented reasoning queries
+in query/service.py: transitive exposure, live resolution windows, and the
+core blast-radius traversal.
 """
 
 from __future__ import annotations
@@ -34,27 +35,6 @@ class TransitiveExposureResult:
             "resolved_at": self.resolved_at,
             "depth": self.depth,
             "path": self.path,
-        }
-
-
-@dataclass
-class IntroducingVersionResult:
-    """Answer to Question 2: Which version introduced the vulnerability?"""
-    advisory_key: str
-    introducing_version_key: str | None
-    confidence: float
-    evidence: str
-    precise: bool  # False if defaulted to advisory range start
-    stated_range: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "advisory_key": self.advisory_key,
-            "introducing_version_key": self.introducing_version_key,
-            "confidence": self.confidence,
-            "evidence": self.evidence,
-            "precise": self.precise,
-            "stated_range": self.stated_range,
         }
 
 
@@ -110,109 +90,4 @@ class BlastRadiusResult:
                 {"key": n.key, "label": n.label, "depth": n.depth, "path": n.path}
                 for n in self.nodes
             ],
-        }
-
-
-@dataclass
-class TyposquatResult:
-    """Answer to Question 5: Are there likely typosquat packages nearby?"""
-    package_key: str
-    popular_target: str
-    similarity_score: float
-    method: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "package_key": self.package_key,
-            "popular_target": self.popular_target,
-            "similarity_score": self.similarity_score,
-            "method": self.method,
-        }
-
-
-@dataclass
-class SharedInfraMaintainerResult:
-    """Answer to Question 6: Which other packages share maintainers or infrastructure?"""
-    package_key: str
-    connected_package_key: str
-    link_type: Literal["same_maintainer", "shared_infrastructure"]
-    shared_entity_key: str
-    evidence_type: str
-    confidence: float
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "package_key": self.package_key,
-            "connected_package_key": self.connected_package_key,
-            "link_type": self.link_type,
-            "shared_entity_key": self.shared_entity_key,
-            "evidence_type": self.evidence_type,
-            "confidence": self.confidence,
-        }
-
-
-@dataclass
-class PredictedPropagationResult:
-    """Predictive Impact: Propagation forecasting."""
-    consumer_key: str
-    consumer_label: str  # "Application" | "Package"
-    declared_range: str
-    flagged_version_key: str
-    confidence: float
-    basis: str = "propagation"
-    type: Literal["predicted"] = "predicted"
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": self.type,
-            "basis": self.basis,
-            "consumer_key": self.consumer_key,
-            "consumer_label": self.consumer_label,
-            "declared_range": self.declared_range,
-            "flagged_version_key": self.flagged_version_key,
-            "confidence": self.confidence,
-        }
-
-
-@dataclass
-class EarlyWarningRiskResult:
-    """Predictive Impact: Early-warning risk scoring."""
-    package_key: str
-    risk_score: float  # 0.0 to 1.0
-    confidence: float
-    contributing_factors: list[dict[str, Any]]
-    basis: str = "early_warning"
-    type: Literal["predicted"] = "predicted"
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": self.type,
-            "basis": self.basis,
-            "package_key": self.package_key,
-            "risk_score": self.risk_score,
-            "confidence": self.confidence,
-            "contributing_factors": self.contributing_factors,
-        }
-
-
-@dataclass
-class ChainRisk:
-    """Chained-Vulnerability Detection Result."""
-    package_a: str
-    package_b: str
-    risk_type: str
-    description: str
-    confidence: float
-    path: list[str]
-    mitigation: str
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "package_a": self.package_a,
-            "package_b": self.package_b,
-            "risk_type": self.risk_type,
-            "description": self.description,
-            "confidence": self.confidence,
-            "path": self.path,
-            "mitigation": self.mitigation,
         }

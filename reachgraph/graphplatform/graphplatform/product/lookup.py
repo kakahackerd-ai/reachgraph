@@ -1,7 +1,9 @@
-"""Package Lookup Service -- Phase 6.
+"""Package Lookup Service.
 
 Public package lookup surface with in-memory caching, token-bucket rate
-limiting, and on-demand async fetching for unindexed packages.
+limiting, and on-demand async fetching for unindexed packages. Blast-radius
+dependents (who depends on this package) are populated separately by the
+GitHub dependents scrape module -- see ingestion/dependents/github_scrape.py.
 """
 
 from __future__ import annotations
@@ -13,7 +15,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from ..ingestion.advisory.osv import OSVConnector
 from ..ingestion.registry.npm import NpmConnector
 from ..ingestion.registry.pypi import PyPIConnector
 from ..query.service import QueryReasoningService
@@ -56,7 +57,7 @@ class RateLimiter:
 
 
 class PackageLookupService:
-    """Look up combined supply-chain verdicts for npm and PyPI packages."""
+    """Look up npm/PyPI package metadata plus transitive exposure and blast radius."""
 
     def __init__(
         self,
@@ -116,52 +117,10 @@ class PackageLookupService:
                 "version": version,
             }
 
-        # 4. Gather verdict components via QueryReasoningService
-        advisories = self.write_service.get_advisories_for("Package", pkg_key, consistency="causal")
-        if version:
-            v_advs = self.write_service.get_advisories_for("Version", target_key, consistency="causal")
-            advisories = list({a["advisory_key"]: a for a in (advisories + v_advs)}.values())
-
-        # Enrich advisories with INTRODUCED_IN precision
-        enriched_advisories = []
-        for adv in advisories:
-            adv_key = adv["advisory_key"]
-            intro = self.query_service.introducing_version(adv_key, consistency="causal")
-            enriched_advisories.append({
-                "advisory_key": adv_key,
-                "severity": adv.get("severity", "UNKNOWN"),
-                "advisory_published_at": adv.get("advisory_published_at"),
-                "introduced_in": intro.to_dict(),
-            })
-
-        # Typosquats nearby
-        typosquats = [t.to_dict() for t in self.query_service.nearby_typosquats(pkg_key, consistency="causal")]
-
-        # Shared maintainers and infrastructure
-        shared_entities = [s.to_dict() for s in self.query_service.shared_maintainers_and_infra(pkg_key, consistency="causal")]
-
-        # Early warning predictive scoring
-        early_warning = self.query_service.predict_early_warning(pkg_key, write_to_graph=False, consistency="causal").to_dict()
-
-        # Transitive exposure
+        # 4. Transitive exposure + blast radius over whatever DEPENDS_ON/
+        # RESOLVED_VERSION_AT edges are already in the graph.
         exposures = [exp.to_dict() for exp in self.query_service.transitive_exposure(target_key, consistency="causal")]
-
-        # Blast radius
         blast = self.query_service.blast_radius(target_key, consistency="causal").to_dict()
-
-        # Overall risk level determination
-        has_crit = any(a["severity"] == "CRITICAL" for a in enriched_advisories)
-        has_high = any(a["severity"] == "HIGH" for a in enriched_advisories)
-        risk_score = early_warning.get("risk_score", 0.0)
-
-        if has_crit or risk_score >= 0.8:
-            verdict = "CRITICAL_RISK"
-        elif has_high or risk_score >= 0.5:
-            verdict = "HIGH_RISK"
-        elif enriched_advisories or risk_score >= 0.25:
-            verdict = "MEDIUM_RISK"
-        else:
-            verdict = "CLEAN"
 
         result = {
             "status": "ok",
@@ -169,12 +128,6 @@ class PackageLookupService:
             "ecosystem": eco,
             "version": version,
             "target_key": target_key,
-            "verdict": verdict,
-            "advisories": enriched_advisories,
-            "socket_score": pkg_data.get("socket_score") if pkg_data else None,
-            "typosquats": typosquats,
-            "shared_maintainers_and_infrastructure": shared_entities,
-            "early_warning_prediction": early_warning,
             "transitive_exposures": exposures,
             "blast_radius": blast,
             "cached_at": datetime.now().isoformat(),
@@ -208,14 +161,7 @@ class PackageLookupService:
                 from ..ingestion.writer import GraphIngestionWriter
                 writer = GraphIngestionWriter(self.write_service)
                 for ev in events:
-                    writer.write_event(ev)
-
-                # Fetch OSV advisories
-                oconn = OSVConnector()
-                adv_events = list(oconn.backfill([(ecosystem, name)]))
-                oconn.close()
-                for aev in adv_events:
-                    writer.write_event(aev)
+                    writer.handle(ev.to_dict())
 
             except Exception:
                 log.exception("on-demand fetch failed for %s", key)

@@ -1,13 +1,11 @@
-"""Integration tests for Phase 6 Product Surfaces."""
+"""Integration tests for the Product Surfaces (package lookup, repo scanner)."""
 
 from __future__ import annotations
 
 import datetime as dt
 import time
-import pytest
 
 from graphplatform import schema
-from graphplatform.product.bot import GitHubBotService
 from graphplatform.product.lookup import PackageLookupService, RateLimiter
 from graphplatform.product.scanner import RepoScannerService
 from graphplatform.query.service import QueryReasoningService
@@ -32,7 +30,7 @@ def test_package_lookup_verdict_caching_and_rate_limiting(service, cleanup, run_
     res1 = lookup_svc.lookup("npm", f"lookup-pkg-{run_id}", "1.0.0", client_id="test-client")
     assert res1["status"] == "ok"
     assert res1["package"] == f"lookup-pkg-{run_id}"
-    assert "verdict" in res1
+    assert "blast_radius" in res1
 
     # 2. Cached lookup
     res2 = lookup_svc.lookup("npm", f"lookup-pkg-{run_id}", "1.0.0", client_id="test-client")
@@ -69,27 +67,3 @@ def test_repo_scanner_async_job_flow(service, tmp_path, run_id):
     assert job.result is not None
     assert job.result["total_dependencies_scanned"] >= 1
     assert any(m["application_key"].endswith("test-app") for m in job.result["discovered_applications"])
-
-
-def test_github_bot_webhook_and_signature_verification(service, tmp_path, run_id):
-    query_svc = QueryReasoningService(service)
-    bot = GitHubBotService(query_svc, service, webhook_secret="secret-token-123", fail_on_severity="HIGH")
-
-    # Signature verification
-    payload = b'{"ref": "refs/heads/main"}'
-    import hashlib, hmac
-    mac = hmac.new(b"secret-token-123", payload, hashlib.sha256).hexdigest()
-    assert bot.verify_signature(payload, f"sha256={mac}") is True
-    assert bot.verify_signature(payload, "sha256=invalid-signature") is False
-
-    # Event handling
-    push_payload = {
-        "repository": {"name": "core-service", "owner": {"login": f"org-{run_id}"}},
-        "commits": [{"added": ["package.json"], "modified": ["package-lock.json"]}],
-    }
-
-    res = bot.handle_webhook_event("push", push_payload)
-    assert res["status"] == "processed"
-    assert "package-lock.json" in res["manifest_files_changed"]
-    assert "check_run" in res
-    assert "pr_comment" in res

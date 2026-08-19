@@ -1,5 +1,5 @@
 from graphplatform import schema
-from graphplatform.ingestion.events import AdvisoryPublished, PackageVersionPublished
+from graphplatform.ingestion.events import PackageVersionPublished
 from graphplatform.ingestion.writer import normalize_ecosystem
 
 
@@ -48,52 +48,3 @@ def test_package_version_published_writes_package_version_dep_and_maintainer(wri
     writer.handle(event)
     deps_again = service.get_dependencies_of(schema.PACKAGE, f"npm:{pkg}", consistency="strong")
     assert len(deps_again) == 1
-
-
-def test_advisory_published_writes_package_and_exact_version_affects(writer, service, cleanup, run_id):
-    pkg = f"vuln-pkg-{run_id}"
-    advisory_id = f"GHSA-test-{run_id}"
-    event = AdvisoryPublished(
-        source="ghsa",
-        advisory_id=advisory_id,
-        summary="test advisory",
-        severity="HIGH",
-        advisory_published_at="2024-05-01T00:00:00Z",
-        affected=[{"ecosystem": "npm", "package_name": pkg, "versions": ["1.0.0", "1.0.1"]}],
-    ).to_dict()
-
-    cleanup(schema.ADVISORY, f"ghsa:{advisory_id}")
-    cleanup(schema.PACKAGE, f"npm:{pkg}")
-    cleanup(schema.VERSION, f"npm:{pkg}@1.0.0")
-    cleanup(schema.VERSION, f"npm:{pkg}@1.0.1")
-
-    writer.handle(event)
-
-    advisory = service.get_advisory(f"ghsa:{advisory_id}", consistency="strong")
-    assert advisory is not None
-    assert advisory["summary"] == "test advisory"
-
-    package_affects = service.get_advisories_for(schema.PACKAGE, f"npm:{pkg}", consistency="strong")
-    assert [(a["advisory_key"], a["severity"]) for a in package_affects] == [(f"ghsa:{advisory_id}", "HIGH")]
-
-    version_affects = service.get_advisories_for(schema.VERSION, f"npm:{pkg}@1.0.0", consistency="strong")
-    assert [(a["advisory_key"], a["severity"]) for a in version_affects] == [(f"ghsa:{advisory_id}", "HIGH")]
-
-
-def test_advisory_published_skips_affected_entry_with_unknown_ecosystem(writer, service, cleanup, run_id):
-    advisory_id = f"GHSA-unknown-eco-{run_id}"
-    event = AdvisoryPublished(
-        source="ghsa",
-        advisory_id=advisory_id,
-        summary="test advisory",
-        severity="LOW",
-        advisory_published_at="2024-05-01T00:00:00Z",
-        affected=[{"ecosystem": "nuget", "package_name": f"whatever-{run_id}"}],
-    ).to_dict()
-
-    cleanup(schema.ADVISORY, f"ghsa:{advisory_id}")
-    writer.handle(event)
-
-    advisory = service.get_advisory(f"ghsa:{advisory_id}", consistency="strong")
-    assert advisory is not None  # the advisory itself is still recorded
-    assert service.get_package(f"nuget:whatever-{run_id}", consistency="strong") is None

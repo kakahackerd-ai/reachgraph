@@ -37,8 +37,6 @@ class GraphIngestionWriter:
         kind = event.get("type")
         if kind == "package_version_published":
             self._handle_package_version_published(event)
-        elif kind == "advisory_published":
-            self._handle_advisory_published(event)
         else:
             raise ValueError(f"unknown event type: {kind!r}")
 
@@ -85,64 +83,3 @@ class GraphIngestionWriter:
             "ingested package_version_published",
             extra={"package_key": package_key, "version": version, "deps": len(event.get("dependencies") or {})},
         )
-
-    def _handle_advisory_published(self, event: dict[str, Any]) -> None:
-        source = event["source"]
-        advisory_id = event["advisory_id"]
-        advisory_key = f"{source}:{advisory_id}"
-        published_at = from_iso(event["advisory_published_at"])
-        now = datetime.now(timezone.utc)
-
-        self._svc.upsert_advisory(
-            advisory_key,
-            source,
-            advisory_id,
-            event.get("summary", ""),
-            first_observed_at=now,
-            event_time=published_at,
-        )
-
-        placed = 0
-        for item in event.get("affected") or []:
-            ecosystem = normalize_ecosystem(item.get("ecosystem", ""))
-            package_name = item.get("package_name")
-            if not ecosystem or not package_name:
-                continue  # can't place this in the graph without a known ecosystem
-            placed += 1
-            package_key = f"{ecosystem}:{package_name}"
-            self._svc.upsert_package(
-                package_key, ecosystem, package_name, first_observed_at=now, event_time=published_at
-            )
-            self._svc.write_affects(
-                advisory_key,
-                schema.PACKAGE,
-                package_key,
-                published_at,
-                event["severity"],
-                first_observed_at=now,
-                event_time=published_at,
-            )
-
-            versions = item.get("versions") or []
-            if len(versions) > 50:
-                log.info(
-                    "advisory affects too many exact versions to enumerate -- package-level AFFECTS only",
-                    extra={"advisory_key": advisory_key, "package_key": package_key, "count": len(versions)},
-                )
-                continue
-            for version in versions:
-                version_key = f"{ecosystem}:{package_name}@{version}"
-                self._svc.upsert_version(
-                    version_key, package_key, version, first_observed_at=now, event_time=published_at
-                )
-                self._svc.write_affects(
-                    advisory_key,
-                    schema.VERSION,
-                    version_key,
-                    published_at,
-                    event["severity"],
-                    first_observed_at=now,
-                    event_time=published_at,
-                )
-
-        log.info("ingested advisory_published", extra={"advisory_key": advisory_key, "affected_placed": placed})

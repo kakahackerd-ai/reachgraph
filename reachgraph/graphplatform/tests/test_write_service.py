@@ -126,19 +126,6 @@ def test_upsert_maintainer_roundtrip_and_idempotent(service, cleanup, run_id):
     assert got["first_observed_at"] == schema.to_iso(T0)
 
 
-def test_upsert_infrastructure_roundtrip_and_idempotent(service, cleanup, run_id):
-    key = f"infra:test-{run_id}"
-    cleanup(schema.INFRASTRUCTURE, key)
-
-    service.upsert_infrastructure(key, "ci_system", "github-actions", first_observed_at=T0, event_time=T0)
-    service.upsert_infrastructure(key, "ci_system", "github-actions", first_observed_at=T1, event_time=T1)
-
-    assert _count_nodes(service, schema.INFRASTRUCTURE, key) == 1
-    got = service.get_infrastructure(key, consistency="strong")
-    assert got["kind"] == "ci_system"
-    assert got["identifier"] == "github-actions"
-
-
 def test_upsert_application_roundtrip_and_idempotent(service, cleanup, run_id):
     key = f"test-org/test-repo-{run_id}"
     cleanup(schema.APPLICATION, key)
@@ -152,16 +139,20 @@ def test_upsert_application_roundtrip_and_idempotent(service, cleanup, run_id):
     assert got["subpath"] == ""
 
 
-def test_upsert_advisory_roundtrip_and_idempotent(service, cleanup, run_id):
-    key = f"osv:TEST-{run_id}"
-    cleanup(schema.ADVISORY, key)
+def test_upsert_file_roundtrip_and_idempotent(service, cleanup, run_id):
+    app_key = f"test-org/file-repo-{run_id}"
+    key = f"{app_key}:src/index.js"
+    cleanup(schema.APPLICATION, app_key)
+    cleanup(schema.FILE, key)
 
-    service.upsert_advisory(key, "osv", f"TEST-{run_id}", "a test advisory", first_observed_at=T0, event_time=T0)
-    service.upsert_advisory(key, "osv", f"TEST-{run_id}", "updated summary", first_observed_at=T1, event_time=T1)
+    service.upsert_application(app_key, "test-org", f"file-repo-{run_id}", first_observed_at=T0, event_time=T0)
+    service.upsert_file(key, "src/index.js", app_key, first_observed_at=T0, event_time=T0)
+    service.upsert_file(key, "src/index.js", app_key, first_observed_at=T1, event_time=T1)
 
-    assert _count_nodes(service, schema.ADVISORY, key) == 1
-    got = service.get_advisory(key, consistency="strong")
-    assert got["summary"] == "updated summary"
+    assert _count_nodes(service, schema.FILE, key) == 1
+    got = service.get_file(key, consistency="strong")
+    assert got["path"] == "src/index.js"
+    assert got["application_key"] == app_key
     assert got["first_observed_at"] == schema.to_iso(T0)
 
 
@@ -293,137 +284,30 @@ def test_published_by_roundtrip_idempotent(service, cleanup, run_id):
     assert got == [{"maintainer_key": m_key, "event_time": schema.to_iso(T1)}]
 
 
-def test_affects_roundtrip_idempotent(service, cleanup, run_id):
-    adv_key = f"osv:AFF-{run_id}"
-    pkg_key = f"npm:test-aff-{run_id}"
-    ver_key = f"{pkg_key}@1.0.0"
-    cleanup(schema.ADVISORY, adv_key)
-    cleanup(schema.PACKAGE, pkg_key)
-    cleanup(schema.VERSION, ver_key)
-
-    service.upsert_advisory(adv_key, "osv", f"AFF-{run_id}", "test", first_observed_at=T0, event_time=T0)
-    service.upsert_package(pkg_key, "npm", "test-aff", first_observed_at=T0, event_time=T0)
-    service.upsert_version(ver_key, pkg_key, "1.0.0", first_observed_at=T0, event_time=T0)
-
-    service.write_affects(adv_key, schema.VERSION, ver_key, T0, "high", first_observed_at=T0, event_time=T0)
-    service.write_affects(adv_key, schema.VERSION, ver_key, T0, "critical", first_observed_at=T1, event_time=T1)
-
-    assert _count_edges(service, schema.AFFECTS, schema.ADVISORY, adv_key, schema.VERSION, ver_key) == 1
-    got = service.get_advisories_for(schema.VERSION, ver_key, consistency="strong")
-    assert got == [{"advisory_key": adv_key, "severity": "critical", "advisory_published_at": schema.to_iso(T0)}]
-
-
-def test_introduced_in_roundtrip_idempotent(service, cleanup, run_id):
-    adv_key = f"osv:INTRO-{run_id}"
-    pkg_key = f"npm:test-intro-{run_id}"
-    ver_key = f"{pkg_key}@1.0.0"
-    cleanup(schema.ADVISORY, adv_key)
-    cleanup(schema.PACKAGE, pkg_key)
-    cleanup(schema.VERSION, ver_key)
-
-    service.upsert_advisory(adv_key, "osv", f"INTRO-{run_id}", "test", first_observed_at=T0, event_time=T0)
-    service.upsert_package(pkg_key, "npm", "test-intro", first_observed_at=T0, event_time=T0)
-    service.upsert_version(ver_key, pkg_key, "1.0.0", first_observed_at=T0, event_time=T0)
-
-    service.write_introduced_in(adv_key, ver_key, 0.7, "heuristic", first_observed_at=T0, event_time=T0)
-    service.write_introduced_in(adv_key, ver_key, 0.95, "manual", first_observed_at=T1, event_time=T1)
-
-    assert _count_edges(service, schema.INTRODUCED_IN, schema.ADVISORY, adv_key, schema.VERSION, ver_key) == 1
-    rows = service._run(
-        f"MATCH (adv:{schema.ADVISORY} {{key:$a}})-[r:{schema.INTRODUCED_IN}]->(v:{schema.VERSION} {{key:$b}}) "
-        f"RETURN r.confidence AS confidence, r.evidence AS evidence",
-        a=adv_key,
-        b=ver_key,
-        consistency="strong",
-    )
-    assert rows == [{"confidence": 0.95, "evidence": "manual"}]
-
-
-def test_same_maintainer_as_roundtrip_idempotent_and_validates_evidence_type(service, cleanup, run_id):
-    a_key = f"npm:maintainer:sm-a-{run_id}"
-    b_key = f"npm:maintainer:sm-b-{run_id}"
-    cleanup(schema.MAINTAINER, a_key)
-    cleanup(schema.MAINTAINER, b_key)
-    service.upsert_maintainer(a_key, "npm", "a@example.com", first_observed_at=T0, event_time=T0)
-    service.upsert_maintainer(b_key, "npm", "b@example.com", first_observed_at=T0, event_time=T0)
-
-    with pytest.raises(ValueError):
-        service.write_same_maintainer_as(a_key, b_key, 0.9, "not-a-real-type", first_observed_at=T0, event_time=T0)
-
-    service.write_same_maintainer_as(
-        a_key, b_key, 0.9, "verified_email", first_observed_at=T0, event_time=T0
-    )
-    service.write_same_maintainer_as(
-        a_key, b_key, 0.99, "signing_key", first_observed_at=T1, event_time=T1
-    )
-    assert _count_edges(service, schema.SAME_MAINTAINER_AS, schema.MAINTAINER, a_key, schema.MAINTAINER, b_key) == 1
-    rows = service._run(
-        f"MATCH (a:{schema.MAINTAINER} {{key:$a}})-[r:{schema.SAME_MAINTAINER_AS}]->(b:{schema.MAINTAINER} {{key:$b}}) "
-        f"RETURN r.confidence AS confidence, r.evidence_type AS evidence_type",
-        a=a_key,
-        b=b_key,
-        consistency="strong",
-    )
-    assert rows == [{"confidence": 0.99, "evidence_type": "signing_key"}]
-
-
-def test_shares_infrastructure_with_roundtrip_idempotent(service, cleanup, run_id):
-    a_key = f"npm:test-si-a-{run_id}"
-    b_key = f"npm:test-si-b-{run_id}"
-    cleanup(schema.PACKAGE, a_key)
-    cleanup(schema.PACKAGE, b_key)
-    service.upsert_package(a_key, "npm", "a", first_observed_at=T0, event_time=T0)
-    service.upsert_package(b_key, "npm", "b", first_observed_at=T0, event_time=T0)
-
-    service.write_shares_infrastructure_with(
-        schema.PACKAGE, a_key, schema.PACKAGE, b_key, "ci_system", first_observed_at=T0, event_time=T0
-    )
-    service.write_shares_infrastructure_with(
-        schema.PACKAGE, a_key, schema.PACKAGE, b_key, "ip_range", first_observed_at=T1, event_time=T1
-    )
-    assert _count_edges(service, schema.SHARES_INFRASTRUCTURE_WITH, schema.PACKAGE, a_key, schema.PACKAGE, b_key) == 1
-
-
-def test_possible_typosquat_of_roundtrip_idempotent(service, cleanup, run_id):
-    a_key = f"npm:test-typo-{run_id}"
-    b_key = f"npm:test-real-{run_id}"
-    cleanup(schema.PACKAGE, a_key)
-    cleanup(schema.PACKAGE, b_key)
-    service.upsert_package(a_key, "npm", "typo", first_observed_at=T0, event_time=T0)
-    service.upsert_package(b_key, "npm", "real", first_observed_at=T0, event_time=T0)
-
-    service.write_typosquat_of(a_key, b_key, 0.92, "damerau-levenshtein", first_observed_at=T0, event_time=T0)
-    service.write_typosquat_of(a_key, b_key, 0.95, "damerau-levenshtein", first_observed_at=T1, event_time=T1)
-    assert _count_edges(service, schema.POSSIBLE_TYPOSQUAT_OF, schema.PACKAGE, a_key, schema.PACKAGE, b_key) == 1
-
-
-def test_predicted_exposure_is_structurally_distinct_from_affects(service, cleanup, run_id):
-    app_key = f"test-org/pred-repo-{run_id}"
-    pkg_key = f"npm:test-pred-{run_id}"
-    ver_key = f"{pkg_key}@1.0.0"
+def test_contains_and_imports_roundtrip_idempotent(service, cleanup, run_id):
+    app_key = f"test-org/import-repo-{run_id}"
+    file_key = f"{app_key}:src/index.js"
+    pkg_key = f"npm:test-imported-{run_id}"
     cleanup(schema.APPLICATION, app_key)
+    cleanup(schema.FILE, file_key)
     cleanup(schema.PACKAGE, pkg_key)
-    cleanup(schema.VERSION, ver_key)
 
-    service.upsert_application(app_key, "test-org", f"pred-repo-{run_id}", first_observed_at=T0, event_time=T0)
-    service.upsert_package(pkg_key, "npm", "test-pred", first_observed_at=T0, event_time=T0)
-    service.upsert_version(ver_key, pkg_key, "1.0.0", first_observed_at=T0, event_time=T0)
+    service.upsert_application(app_key, "test-org", f"import-repo-{run_id}", first_observed_at=T0, event_time=T0)
+    service.upsert_file(file_key, "src/index.js", app_key, first_observed_at=T0, event_time=T0)
+    service.upsert_package(pkg_key, "npm", "test-imported", first_observed_at=T0, event_time=T0)
 
-    with pytest.raises(ValueError):
-        service.write_predicted_exposure(
-            schema.APPLICATION, app_key, schema.VERSION, ver_key, T0, 0.5, "not-a-real-basis",
-            first_observed_at=T0, event_time=T0,
-        )
+    created1 = service.write_contains(app_key, file_key, first_observed_at=T0, event_time=T0)
+    assert created1 is True
+    service.write_contains(app_key, file_key, first_observed_at=T1, event_time=T1)
+    assert _count_edges(service, schema.CONTAINS, schema.APPLICATION, app_key, schema.FILE, file_key) == 1
 
-    service.write_predicted_exposure(
-        schema.APPLICATION, app_key, schema.VERSION, ver_key, T0, 0.6, "propagation",
-        first_observed_at=T0, event_time=T0,
-    )
+    created2 = service.write_imports(file_key, pkg_key, first_observed_at=T0, event_time=T0)
+    assert created2 is True
+    service.write_imports(file_key, pkg_key, first_observed_at=T1, event_time=T1)
+    assert _count_edges(service, schema.IMPORTS, schema.FILE, file_key, schema.PACKAGE, pkg_key) == 1
 
-    # never confirmed: no AFFECTS edge was created by this call.
-    assert service.get_advisories_for(schema.VERSION, ver_key, consistency="strong") == []
-    assert _count_edges(service, schema.PREDICTED_EXPOSURE, schema.APPLICATION, app_key, schema.VERSION, ver_key) == 1
-    assert _count_edges(service, schema.AFFECTS, schema.APPLICATION, app_key, schema.VERSION, ver_key) == 0
+    importers = service.get_importers_of(pkg_key, consistency="strong")
+    assert importers == [{"file_key": file_key, "path": "src/index.js", "application_key": app_key}]
 
 
 # ---------------------------------------------------------------------------

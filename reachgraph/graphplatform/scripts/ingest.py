@@ -1,26 +1,22 @@
 #!/usr/bin/env python3
-"""Phase 2 ingestion CLI.
+"""Ingestion CLI.
 
-Registry and advisory connectors always publish onto the real event queue
-(Redis Streams) rather than writing HydraDB directly -- run `consume` in a
-second process/terminal to actually drain the queue into the graph. This
-mirrors the real intended shape (an independent fetcher process and an
-independent writer process), not a shortcut for the demo.
+Registry connectors always publish onto the real event queue (Redis
+Streams) rather than writing HydraDB directly -- run `consume` in a second
+process/terminal to actually drain the queue into the graph. This mirrors
+the real intended shape (an independent fetcher process and an independent
+writer process), not a shortcut for the demo.
 
 Manifest discovery has no queue in front of it by design (see
 graphplatform/README.md) -- it writes directly through GraphWriteService.
 
 Examples:
-    # terminal 1: drain both streams into HydraDB as events arrive
+    # terminal 1: drain the registry stream into HydraDB as events arrive
     python scripts/ingest.py consume --stop-after-idle 3
 
     # terminal 2: real bounded npm/PyPI backfill for a handful of packages
     python scripts/ingest.py registry npm backfill lodash express is-number
     python scripts/ingest.py registry pypi backfill requests flask
-
-    # real bounded advisory pulls
-    python scripts/ingest.py advisory osv backfill npm:lodash pypi:requests
-    python scripts/ingest.py advisory ghsa backfill --ecosystem npm --max-pages 1
 
     # manifest discovery against a real checked-out repo
     python scripts/ingest.py manifest /path/to/repo --org some-org --repo some-repo
@@ -36,9 +32,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from graphplatform import GraphWriteService  # noqa: E402
-from graphplatform.ingestion.advisory.ghsa import GHSAConnector  # noqa: E402
-from graphplatform.ingestion.advisory.osv import OSVConnector  # noqa: E402
-from graphplatform.ingestion.events import STREAM_ADVISORY, STREAM_REGISTRY  # noqa: E402
+from graphplatform.ingestion.events import STREAM_REGISTRY  # noqa: E402
 from graphplatform.ingestion.manifest.service import discover_and_ingest  # noqa: E402
 from graphplatform.ingestion.queue import RedisStreamQueue  # noqa: E402
 from graphplatform.ingestion.registry.npm import NpmConnector  # noqa: E402
@@ -87,33 +81,6 @@ def cmd_registry(args: argparse.Namespace) -> None:
         q.close()
 
 
-def cmd_advisory(args: argparse.Namespace) -> None:
-    q = _queue()
-    try:
-        if args.source == "osv":
-            conn = OSVConnector()
-            pairs = [tuple(p.split(":", 1)) for p in args.watch] if args.mode == "live" else [
-                tuple(p.split(":", 1)) for p in args.packages
-            ]
-            events = (
-                conn.fetch_or_subscribe(watch=pairs, max_iterations=args.max_iterations)
-                if args.mode == "live"
-                else conn.backfill(pairs)
-            )
-        else:
-            conn = GHSAConnector()
-            events = (
-                conn.fetch_or_subscribe(ecosystem=args.ecosystem, max_iterations=args.max_iterations)
-                if args.mode == "live"
-                else conn.backfill(ecosystem=args.ecosystem, max_pages=args.max_pages)
-            )
-        n = q.publish_all(STREAM_ADVISORY, (e.to_dict() for e in events))
-        print(f"published {n} {args.source} advisory events to {STREAM_ADVISORY}")
-    finally:
-        conn.close()
-        q.close()
-
-
 def cmd_consume(args: argparse.Namespace) -> None:
     svc = _service()
     writer = GraphIngestionWriter(svc)
@@ -125,19 +92,15 @@ def cmd_consume(args: argparse.Namespace) -> None:
         writer.handle(event)
         total += 1
 
-    for stream, group in ((STREAM_REGISTRY, "graphwriter"), (STREAM_ADVISORY, "graphwriter")):
-        remaining = None if args.max_events is None else max(0, args.max_events - total)
-        if remaining == 0:
-            break
-        q.subscribe(
-            stream,
-            group,
-            "consumer-1",
-            handler,
-            stop_after_idle_reads=args.stop_after_idle,
-            block_ms=2000,
-            max_messages=remaining,
-        )
+    q.subscribe(
+        STREAM_REGISTRY,
+        "graphwriter",
+        "consumer-1",
+        handler,
+        stop_after_idle_reads=args.stop_after_idle,
+        block_ms=2000,
+        max_messages=args.max_events,
+    )
     print(f"wrote {total} events into HydraDB")
     svc.close()
     q.close()
@@ -169,16 +132,6 @@ def main() -> None:
     p_registry.add_argument("--since", type=int, default=None, help="live mode: seq/serial to resume from")
     p_registry.add_argument("--max-iterations", type=int, default=1, help="live mode: bounded poll loops")
     p_registry.set_defaults(func=cmd_registry)
-
-    p_advisory = sub.add_parser("advisory", help="OSV/GHSA advisory ingestion -> queue")
-    p_advisory.add_argument("source", choices=["osv", "ghsa"])
-    p_advisory.add_argument("mode", choices=["backfill", "live"])
-    p_advisory.add_argument("packages", nargs="*", help="osv backfill: ecosystem:name pairs, e.g. npm:lodash")
-    p_advisory.add_argument("--watch", nargs="*", default=[], help="osv live: ecosystem:name pairs to poll")
-    p_advisory.add_argument("--ecosystem", default=None, help="ghsa: filter, e.g. npm, pip")
-    p_advisory.add_argument("--max-pages", type=int, default=1, help="ghsa backfill: pages of 100")
-    p_advisory.add_argument("--max-iterations", type=int, default=1, help="live mode: bounded poll loops")
-    p_advisory.set_defaults(func=cmd_advisory)
 
     p_consume = sub.add_parser("consume", help="drain the queue into HydraDB via GraphIngestionWriter")
     p_consume.add_argument("--stop-after-idle", type=int, default=2, help="stop after N consecutive empty polls")

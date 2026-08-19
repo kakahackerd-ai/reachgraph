@@ -386,17 +386,6 @@ class GraphWriteService:
             schema.MAINTAINER, key, {"platform": platform, "identity": identity}, first_observed_at, event_time
         )
 
-    def upsert_infrastructure(
-        self, key: str, kind: str, identifier: str, *, first_observed_at: datetime, event_time: datetime
-    ) -> bool:
-        return self._upsert_node(
-            schema.INFRASTRUCTURE,
-            key,
-            {"kind": kind, "identifier": identifier},
-            first_observed_at,
-            event_time,
-        )
-
     def upsert_application(
         self,
         key: str,
@@ -415,22 +404,11 @@ class GraphWriteService:
             event_time,
         )
 
-    def upsert_advisory(
-        self,
-        key: str,
-        source: str,
-        advisory_id: str,
-        summary: str,
-        *,
-        first_observed_at: datetime,
-        event_time: datetime,
+    def upsert_file(
+        self, key: str, path: str, application_key: str, *, first_observed_at: datetime, event_time: datetime
     ) -> bool:
         return self._upsert_node(
-            schema.ADVISORY,
-            key,
-            {"source": source, "advisory_id": advisory_id, "summary": summary},
-            first_observed_at,
-            event_time,
+            schema.FILE, key, {"path": path, "application_key": application_key}, first_observed_at, event_time
         )
 
     # ====================================================================
@@ -458,14 +436,6 @@ class GraphWriteService:
             consistency,
         )
 
-    def get_infrastructure(self, key: str, consistency: Consistency = "causal") -> dict[str, Any] | None:
-        return self._read_node(
-            schema.INFRASTRUCTURE,
-            key,
-            ["key", "kind", "identifier", "first_observed_at", "event_time"],
-            consistency,
-        )
-
     def get_application(self, key: str, consistency: Consistency = "causal") -> dict[str, Any] | None:
         return self._read_node(
             schema.APPLICATION,
@@ -474,11 +444,11 @@ class GraphWriteService:
             consistency,
         )
 
-    def get_advisory(self, key: str, consistency: Consistency = "causal") -> dict[str, Any] | None:
+    def get_file(self, key: str, consistency: Consistency = "causal") -> dict[str, Any] | None:
         return self._read_node(
-            schema.ADVISORY,
+            schema.FILE,
             key,
-            ["key", "source", "advisory_id", "summary", "first_observed_at", "event_time"],
+            ["key", "path", "application_key", "first_observed_at", "event_time"],
             consistency,
         )
 
@@ -595,156 +565,30 @@ class GraphWriteService:
             event_time,
         )
 
-    def write_affects(
-        self,
-        advisory_key: str,
-        target_label: str,
-        target_key: str,
-        advisory_published_at: datetime,
-        severity: str,
-        *,
-        first_observed_at: datetime,
-        event_time: datetime,
+    def write_contains(
+        self, application_key: str, file_key: str, *, first_observed_at: datetime, event_time: datetime
     ) -> bool:
-        if target_label not in (schema.VERSION, schema.PACKAGE):
-            raise ValueError("AFFECTS target must be Version or Package")
         return self._upsert_relationship(
-            schema.AFFECTS,
-            schema.ADVISORY,
-            advisory_key,
-            target_label,
-            target_key,
-            {"advisory_published_at": to_iso(advisory_published_at), "severity": severity},
+            schema.CONTAINS,
+            schema.APPLICATION,
+            application_key,
+            schema.FILE,
+            file_key,
+            {},
             first_observed_at,
             event_time,
         )
 
-    def write_introduced_in(
-        self,
-        advisory_key: str,
-        version_key: str,
-        confidence: float,
-        evidence: str,
-        *,
-        first_observed_at: datetime,
-        event_time: datetime,
+    def write_imports(
+        self, file_key: str, package_key: str, *, first_observed_at: datetime, event_time: datetime
     ) -> bool:
         return self._upsert_relationship(
-            schema.INTRODUCED_IN,
-            schema.ADVISORY,
-            advisory_key,
-            schema.VERSION,
-            version_key,
-            {"confidence": confidence, "evidence": evidence},
-            first_observed_at,
-            event_time,
-        )
-
-    def write_same_maintainer_as(
-        self,
-        maintainer_a_key: str,
-        maintainer_b_key: str,
-        confidence: float,
-        evidence_type: str,
-        *,
-        first_observed_at: datetime,
-        event_time: datetime,
-    ) -> bool:
-        if evidence_type not in schema.EVIDENCE_TYPES_MAINTAINER:
-            raise ValueError(f"invalid evidence_type: {evidence_type!r}")
-        return self._upsert_relationship(
-            schema.SAME_MAINTAINER_AS,
-            schema.MAINTAINER,
-            maintainer_a_key,
-            schema.MAINTAINER,
-            maintainer_b_key,
-            {"confidence": confidence, "evidence_type": evidence_type},
-            first_observed_at,
-            event_time,
-        )
-
-    def write_shares_infrastructure_with(
-        self,
-        a_label: str,
-        a_key: str,
-        b_label: str,
-        b_key: str,
-        evidence_type: str,
-        *,
-        first_observed_at: datetime,
-        event_time: datetime,
-    ) -> bool:
-        """Directed in storage (Cypher relationships are always directed),
-        conceptually symmetric. Callers/readers should treat it as
-        undirected -- query both directions, or canonicalize endpoint order
-        before writing, if exact-once-per-pair matters to a later phase.
-        """
-        if a_label not in (schema.VERSION, schema.PACKAGE) or b_label not in (schema.VERSION, schema.PACKAGE):
-            raise ValueError("SHARES_INFRASTRUCTURE_WITH endpoints must be Version or Package")
-        if evidence_type not in schema.EVIDENCE_TYPES_INFRASTRUCTURE:
-            raise ValueError(f"invalid evidence_type: {evidence_type!r}")
-        return self._upsert_relationship(
-            schema.SHARES_INFRASTRUCTURE_WITH,
-            a_label,
-            a_key,
-            b_label,
-            b_key,
-            {"evidence_type": evidence_type},
-            first_observed_at,
-            event_time,
-        )
-
-    def write_typosquat_of(
-        self,
-        source_key: str,
-        target_key: str,
-        similarity_score: float,
-        method: str,
-        *,
-        first_observed_at: datetime,
-        event_time: datetime,
-    ) -> bool:
-        return self._upsert_relationship(
-            schema.POSSIBLE_TYPOSQUAT_OF,
+            schema.IMPORTS,
+            schema.FILE,
+            file_key,
             schema.PACKAGE,
-            source_key,
-            schema.PACKAGE,
-            target_key,
-            {"similarity_score": similarity_score, "method": method},
-            first_observed_at,
-            event_time,
-        )
-
-    def write_predicted_exposure(
-        self,
-        source_label: str,
-        source_key: str,
-        target_label: str,
-        target_key: str,
-        predicted_at: datetime,
-        confidence: float,
-        basis: str,
-        *,
-        first_observed_at: datetime,
-        event_time: datetime,
-    ) -> bool:
-        """Structurally distinct from AFFECTS/RESOLVED_VERSION_AT by
-        relationship TYPE alone, so no reader can mistake a prediction for
-        a confirmed fact by forgetting to check a flag.
-        """
-        if basis not in schema.PREDICTION_BASES:
-            raise ValueError(f"invalid basis: {basis!r} (must be one of {sorted(schema.PREDICTION_BASES)})")
-        if source_label not in (schema.APPLICATION, schema.PACKAGE):
-            raise ValueError("PREDICTED_EXPOSURE source must be Application or Package")
-        if target_label not in (schema.VERSION, schema.PACKAGE):
-            raise ValueError("PREDICTED_EXPOSURE target must be Version or Package")
-        return self._upsert_relationship(
-            schema.PREDICTED_EXPOSURE,
-            source_label,
-            source_key,
-            target_label,
-            target_key,
-            {"predicted_at": to_iso(predicted_at), "confidence": confidence, "basis": basis},
+            package_key,
+            {},
             first_observed_at,
             event_time,
         )
@@ -798,15 +642,10 @@ class GraphWriteService:
             consistency=consistency,
         )
 
-    def get_advisories_for(
-        self, target_label: str, target_key: str, consistency: Consistency = "causal"
-    ) -> list[dict[str, Any]]:
-        if target_label not in (schema.VERSION, schema.PACKAGE):
-            raise ValueError("AFFECTS target must be Version or Package")
+    def get_importers_of(self, package_key: str, consistency: Consistency = "causal") -> list[dict[str, Any]]:
         return self._run(
-            f"MATCH (adv:{schema.ADVISORY})-[r:{schema.AFFECTS}]->(t:{target_label} {{key:$key}}) "
-            f"RETURN adv.key AS advisory_key, r.severity AS severity, "
-            f"r.advisory_published_at AS advisory_published_at",
-            key=target_key,
+            f"MATCH (f:{schema.FILE})-[r:{schema.IMPORTS}]->(p:{schema.PACKAGE} {{key:$key}}) "
+            f"RETURN f.key AS file_key, f.path AS path, f.application_key AS application_key",
+            key=package_key,
             consistency=consistency,
         )

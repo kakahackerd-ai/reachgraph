@@ -31,11 +31,10 @@ from typing import Literal
 PACKAGE = "Package"
 VERSION = "Version"
 MAINTAINER = "Maintainer"
-INFRASTRUCTURE = "Infrastructure"
 APPLICATION = "Application"
-ADVISORY = "Advisory"
+FILE = "File"
 
-NODE_LABELS = frozenset({PACKAGE, VERSION, MAINTAINER, INFRASTRUCTURE, APPLICATION, ADVISORY})
+NODE_LABELS = frozenset({PACKAGE, VERSION, MAINTAINER, APPLICATION, FILE})
 
 # ---------------------------------------------------------------------------
 # Relationship types
@@ -44,28 +43,10 @@ NODE_LABELS = frozenset({PACKAGE, VERSION, MAINTAINER, INFRASTRUCTURE, APPLICATI
 DEPENDS_ON = "DEPENDS_ON"
 RESOLVED_VERSION_AT = "RESOLVED_VERSION_AT"
 PUBLISHED_BY = "PUBLISHED_BY"
-AFFECTS = "AFFECTS"
-INTRODUCED_IN = "INTRODUCED_IN"
-SAME_MAINTAINER_AS = "SAME_MAINTAINER_AS"
-SHARES_INFRASTRUCTURE_WITH = "SHARES_INFRASTRUCTURE_WITH"
-POSSIBLE_TYPOSQUAT_OF = "POSSIBLE_TYPOSQUAT_OF"
-PREDICTED_EXPOSURE = "PREDICTED_EXPOSURE"
+CONTAINS = "CONTAINS"
+IMPORTS = "IMPORTS"
 
-REL_TYPES = frozenset({
-    DEPENDS_ON, RESOLVED_VERSION_AT, PUBLISHED_BY, AFFECTS, INTRODUCED_IN,
-    SAME_MAINTAINER_AS, SHARES_INFRASTRUCTURE_WITH, POSSIBLE_TYPOSQUAT_OF,
-    PREDICTED_EXPOSURE,
-})
-
-# PREDICTED_EXPOSURE is the one relationship type that is never a confirmed
-# fact -- it must stay structurally distinguishable from AFFECTS and
-# RESOLVED_VERSION_AT so no caller can mistake a prediction for ground
-# truth. Concretely: it is a different relationship TYPE (not a flag on an
-# existing edge), and every write of it requires `basis` to be one of these.
-PREDICTION_BASES = frozenset({"propagation", "early_warning"})
-
-EVIDENCE_TYPES_MAINTAINER = frozenset({"verified_email", "signing_key", "manual"})
-EVIDENCE_TYPES_INFRASTRUCTURE = frozenset({"ci_system", "ip_range", "signing_key"})
+REL_TYPES = frozenset({DEPENDS_ON, RESOLVED_VERSION_AT, PUBLISHED_BY, CONTAINS, IMPORTS})
 
 Consistency = Literal["causal", "strong"]
 
