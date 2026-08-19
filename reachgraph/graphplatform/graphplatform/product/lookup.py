@@ -125,18 +125,24 @@ class PackageLookupService:
             self._trigger_on_demand_fetch(eco, name)
 
         # 4. Scrape real dependents off GitHub and write them into the graph
-        # as Application-[:DEPENDS_ON]->Package edges.
+        # as Application-[:DEPENDS_ON]->Package edges. Bulk-write in two
+        # batch round trips (nodes, then edges) rather than a Bolt round
+        # trip per dependent -- see write_service.py's
+        # upsert_applications_batch/write_depends_on_batch_merge_only.
         dependents = {"shown": 0, "known_total": None, "direct_known": None, "indirect_known": None}
         if meta.source_repo:
             owner, repo = meta.source_repo
             page = fetch_dependents(owner, repo, max_items=max_dependents)
-            for dep in page.dependents:
-                app_key = dep.key
-                self.write_service.upsert_application(app_key, dep.owner, dep.repo, first_observed_at=now, event_time=now)
-                self.write_service.write_depends_on(
-                    schema.APPLICATION, app_key, pkg_key, "*", "github-dependents-scrape",
-                    first_observed_at=now, event_time=now,
-                )
+
+            self.write_service.upsert_applications_batch(
+                [(dep.key, dep.owner, dep.repo, "") for dep in page.dependents],
+                first_observed_at=now,
+                event_time=now,
+            )
+            self.write_service.write_depends_on_batch_merge_only(
+                schema.APPLICATION,
+                [(dep.key, pkg_key) for dep in page.dependents],
+            )
             dependents["shown"] = page.shown
             if resolved_version:
                 counts = fetch_dependent_counts(eco, name, resolved_version)

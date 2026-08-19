@@ -8,7 +8,8 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   })
   const data = (await res.json()) as T
   if (!res.ok && !(data as { status?: string }).status) {
-    throw new Error(`request failed: ${res.status}`)
+    const message = (data as { message?: string; error?: string }).message
+    throw new Error(message || `request failed: ${res.status}`)
   }
   return data
 }

@@ -39,8 +39,14 @@ export default function RepoScreen() {
         setJob(finished)
         setPhase('done')
       }
-    } catch {
-      setError('Could not reach the ReachGraph backend. Is scripts/server.py running on :8081?')
+    } catch (err) {
+      setError(
+        err instanceof TypeError
+          ? 'Could not reach the ReachGraph backend. Is scripts/server.py running on :8081?'
+          : err instanceof Error
+            ? err.message
+            : 'scan failed',
+      )
       setPhase('error')
     }
   }

@@ -27,8 +27,14 @@ export default function PackageScreen() {
       } else {
         setResult(res)
       }
-    } catch {
-      setError('Could not reach the ReachGraph backend. Is scripts/server.py running on :8081?')
+    } catch (err) {
+      setError(
+        err instanceof TypeError
+          ? 'Could not reach the ReachGraph backend. Is scripts/server.py running on :8081?'
+          : err instanceof Error
+            ? err.message
+            : 'lookup failed',
+      )
       setResult(null)
     } finally {
       setLoading(false)

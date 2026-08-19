@@ -264,26 +264,34 @@ class QueryReasoningService:
                         visited_nodes[src_key] = node
                         queue.append((src_key, src_label, curr_depth + 1, new_path))
 
-            # 2. Check Applications that resolved versions of this package
-            res_rows = self.write_service._run(
-                f"MATCH (app:{schema.APPLICATION})-[r:{schema.RESOLVED_VERSION_AT}]->"
-                f"(v:{schema.VERSION}) "
-                f"WHERE r.superseded_at = $open "
-                f"RETURN app.key AS app_key, v.key AS vkey",
-                open=schema.OPEN_INTERVAL_SENTINEL,
-                consistency=consistency,
-            )
-            for r in res_rows:
-                vkey = r["vkey"]
-                app_key = r["app_key"]
-                app_pkg = vkey.split("@")[0] if "@" in vkey else vkey
-                if app_pkg == curr_key and app_key not in visited_nodes:
-                    new_path = curr_path + [app_key]
-                    node = BlastRadiusNode(
-                        key=app_key, label=schema.APPLICATION, depth=curr_depth + 1, path=new_path
-                    )
-                    visited_nodes[app_key] = node
-                    queue.append((app_key, schema.APPLICATION, curr_depth + 1, new_path))
+            # 2. Applications that resolved a version of this package. Only
+            # meaningful when curr_key is a Package (an Application's own
+            # key never equals a version's package_key), and filtered
+            # server-side by package_key -- this used to be an unfiltered
+            # scan of every RESOLVED_VERSION_AT edge in the whole graph on
+            # every dequeued BFS node, which made this call's cost grow
+            # with total graph size, not with this traversal's actual
+            # reach (confirmed live: made a real multi-hundred-dependency
+            # repo scan hang for 80+ seconds).
+            if curr_label == schema.PACKAGE:
+                res_rows = self.write_service._run(
+                    f"MATCH (app:{schema.APPLICATION})-[r:{schema.RESOLVED_VERSION_AT}]->"
+                    f"(v:{schema.VERSION} {{package_key: $pkg_key}}) "
+                    f"WHERE r.superseded_at = $open "
+                    f"RETURN app.key AS app_key, v.key AS vkey",
+                    pkg_key=curr_key,
+                    open=schema.OPEN_INTERVAL_SENTINEL,
+                    consistency=consistency,
+                )
+                for r in res_rows:
+                    app_key = r["app_key"]
+                    if app_key not in visited_nodes:
+                        new_path = curr_path + [app_key]
+                        node = BlastRadiusNode(
+                            key=app_key, label=schema.APPLICATION, depth=curr_depth + 1, path=new_path
+                        )
+                        visited_nodes[app_key] = node
+                        queue.append((app_key, schema.APPLICATION, curr_depth + 1, new_path))
 
         pkgs = [k for k, n in visited_nodes.items() if n.label == schema.PACKAGE and k != pkg_key]
         apps = [k for k, n in visited_nodes.items() if n.label == schema.APPLICATION]

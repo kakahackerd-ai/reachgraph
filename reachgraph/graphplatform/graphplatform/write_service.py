@@ -96,6 +96,26 @@ from .schema import Consistency, from_iso, stable_id, to_iso
 
 log = logging.getLogger("graphplatform.write_service")
 
+# The local single-node HydraDB backend's object store is LocalFileSystem,
+# which doesn't implement PutMode::Update -- so its GC (which needs that
+# mode to rewrite manifest/compaction objects) fails every cycle, forever,
+# on this backend specifically (see graphplatform/README.md's "Known
+# limitations"). Once enough cumulative writes have landed since the last
+# store wipe, reads and writes alike start failing with exactly this
+# message. It is not this codebase's bug and there is no query-level fix --
+# the store needs a wipe+restart -- so we detect the signature and raise a
+# clearly-labeled exception instead of letting a raw CypherSyntaxError with
+# an opaque SlateDB message bubble up to an API caller.
+_WRITE_CEILING_SIGNATURE = "historical graph epochs are not SlateDB snapshots"
+
+
+class HydraDBWriteCeilingExceeded(RuntimeError):
+    """Raised when the local HydraDB backend's permanent write-volume
+    ceiling has been hit. See graphplatform/README.md's "Known
+    limitations" -- the store needs `podman stop/rm -rf store,cache/start`.
+    Not recoverable by retrying from inside this process.
+    """
+
 
 class GraphWriteService:
     """The only object in this codebase permitted to hold a HydraDB driver."""
@@ -149,7 +169,17 @@ class GraphWriteService:
             with self._driver.session(database=self._database) as session:
                 result = session.run(query, params)
                 records = [dict(r) for r in result]
-        except Exception:
+        except Exception as exc:
+            if _WRITE_CEILING_SIGNATURE in str(exc):
+                log.error(
+                    "hydradb local write-volume ceiling exceeded -- store needs a wipe+restart, see README",
+                    extra={"write": write, "consistency": consistency},
+                )
+                raise HydraDBWriteCeilingExceeded(
+                    "HydraDB's local store has hit its permanent write-volume ceiling for this backend "
+                    "(see graphplatform/README.md's Known limitations) and needs to be wiped and restarted "
+                    "by an operator -- this is not a transient error and retrying will not help."
+                ) from exc
             log.exception(
                 "hydradb query failed",
                 extra={"cypher": cypher, "write": write, "consistency": consistency},
@@ -205,6 +235,148 @@ class GraphWriteService:
             extra={"label": label, "key": key, "event_time": row["event_time"], "newly_created": created},
         )
         return created
+
+    def _upsert_nodes_batch(
+        self,
+        label: str,
+        rows: list[dict[str, Any]],
+        *,
+        chunk_size: int = 500,
+    ) -> None:
+        """Bulk MERGE+SET for many nodes of the same label in a handful of
+        round trips instead of one pair of round trips per node.
+
+        Trade-off, deliberate and scoped to bulk-import callers only: does
+        NOT preserve historical first_observed_at the way _upsert_node
+        does (every row's first_observed_at is taken as given, not
+        reconciled against what may already be stored) -- HydraDB's
+        UNWIND-batch engine only accelerates MERGE-shaped writes, not
+        reads (confirmed by hand: `UNWIND $keys AS key MATCH (n {key:
+        key}) RETURN ...` and every read-shaped variant tried fails with
+        "UNWIND batch supports one-hop relationships only" or "UNWIND
+        batch node property must be id" -- there is no batched-read path
+        to fetch N existing first_observed_at values in one round trip),
+        so preserving per-row history would still cost N round trips and
+        defeat the point. Every row must already carry `id`, `key`,
+        `first_observed_at` (as an ISO string), and `event_time` (ISO
+        string) plus whatever label-specific properties belong in the SET.
+        """
+        if label not in schema.NODE_LABELS:
+            raise ValueError(f"unknown node label: {label!r}")
+        if not rows:
+            return
+        set_clauses = ", ".join(f"n.{prop} = row.{prop}" for prop in rows[0] if prop != "id")
+        for start in range(0, len(rows), chunk_size):
+            chunk = rows[start : start + chunk_size]
+            self._run(
+                f"UNWIND $rows AS row MERGE (n {{id: row.id}}) SET n:{label}, {set_clauses}",
+                rows=chunk,
+                write=True,
+            )
+        log.info("graph write: node batch upserted", extra={"label": label, "count": len(rows)})
+
+    def upsert_packages_batch(
+        self,
+        items: list[tuple[str, str, str]],  # (key, ecosystem, name)
+        *,
+        first_observed_at: datetime,
+        event_time: datetime,
+    ) -> None:
+        rows = [
+            {
+                "id": stable_id(schema.PACKAGE, key),
+                "key": key,
+                "ecosystem": ecosystem,
+                "name": name,
+                "first_observed_at": to_iso(first_observed_at),
+                "event_time": to_iso(event_time),
+            }
+            for key, ecosystem, name in items
+        ]
+        self._upsert_nodes_batch(schema.PACKAGE, rows)
+
+    def upsert_versions_batch(
+        self,
+        items: list[tuple[str, str, str]],  # (key, package_key, version)
+        *,
+        first_observed_at: datetime,
+        event_time: datetime,
+    ) -> None:
+        rows = [
+            {
+                "id": stable_id(schema.VERSION, key),
+                "key": key,
+                "package_key": package_key,
+                "version": version,
+                "first_observed_at": to_iso(first_observed_at),
+                "event_time": to_iso(event_time),
+            }
+            for key, package_key, version in items
+        ]
+        self._upsert_nodes_batch(schema.VERSION, rows)
+
+    def upsert_applications_batch(
+        self,
+        items: list[tuple[str, str, str, str]],  # (key, org, repo, subpath)
+        *,
+        first_observed_at: datetime,
+        event_time: datetime,
+    ) -> None:
+        rows = [
+            {
+                "id": stable_id(schema.APPLICATION, key),
+                "key": key,
+                "org": org,
+                "repo": repo,
+                "subpath": subpath,
+                "first_observed_at": to_iso(first_observed_at),
+                "event_time": to_iso(event_time),
+            }
+            for key, org, repo, subpath in items
+        ]
+        self._upsert_nodes_batch(schema.APPLICATION, rows)
+
+    def write_depends_on_batch_merge_only(
+        self,
+        source_label: str,
+        items: list[tuple[str, str]],  # (source_key, target_package_key)
+        *,
+        chunk_size: int = 500,
+    ) -> None:
+        """Bulk MERGE-only DEPENDS_ON writes for many edges sharing the
+        same source_label, all Package targets. Unlike write_depends_on,
+        does NOT set range/manager/rel_id/timestamps -- HydraDB's
+        UNWIND-batch mode only accelerates the MERGE step for
+        relationships, not a chained SET (confirmed by hand: a bulk
+        `UNWIND ... MATCH ...-[r]->... SET ...` fails with "UNWIND MATCH
+        must end in RETURN or DELETE"). Safe for bulk-imported edges
+        specifically because get_dependents_of/blast_radius match by
+        relationship type and endpoint keys only, never by these
+        properties -- a bulk edge is just as traversable, only its
+        range/manager display fields come back empty.
+        """
+        if source_label not in (schema.PACKAGE, schema.APPLICATION):
+            raise ValueError("DEPENDS_ON source must be Package or Application")
+        if not items:
+            return
+        rows = [
+            {
+                "a_id": stable_id(source_label, source_key),
+                "b_id": stable_id(schema.PACKAGE, target_key),
+                "rid": stable_id(schema.DEPENDS_ON, source_key, target_key),
+            }
+            for source_key, target_key in items
+        ]
+        for start in range(0, len(rows), chunk_size):
+            chunk = rows[start : start + chunk_size]
+            self._run(
+                f"UNWIND $rows AS row "
+                f"MATCH (a:{source_label} {{id: row.a_id}}), (b:{schema.PACKAGE} {{id: row.b_id}}) "
+                f"MERGE (a)-[r:{schema.DEPENDS_ON} {{id: row.rid}}]->(b)",
+                rows=chunk,
+                write=True,
+            )
+        log.info("graph write: DEPENDS_ON batch merged", extra={"source_label": source_label, "count": len(rows)})
 
     def _annotate_node(self, label: str, key: str, properties: dict[str, Any]) -> None:
         """Set additional properties on an existing node without touching
@@ -518,6 +690,87 @@ class GraphWriteService:
             event_time,
             id_extra=(resolved_iso,),
         )
+
+    def resolve_versions_batch(
+        self,
+        app_key: str,
+        items: list[tuple[str, datetime]],  # (version_key, resolved_at)
+        *,
+        first_observed_at: datetime,
+        event_time: datetime,
+        chunk_size: int = 500,
+    ) -> None:
+        """Bulk-open RESOLVED_VERSION_AT intervals for many versions
+        resolved by the same Application. A batched MERGE pass (one round
+        trip per chunk, same shape as write_depends_on_batch_merge_only)
+        followed by individual SET passes -- SET can't be batched under
+        UNWIND on this engine (confirmed by hand, see
+        write_depends_on_batch_merge_only's docstring), and unlike that
+        method this SET is NOT skippable: superseded_at is the
+        open-interval sentinel blast_radius's traversal filters on, so
+        every edge here needs it written. Still a large win over
+        resolve_version called once per item: that's read+merge+set (3
+        round trips) per edge, this is one shared batched merge plus just
+        the set per edge.
+
+        The SET pass is deliberately sequential, not thread-pooled, even
+        though every SET touches a distinct relationship and reads are
+        safe to parallelize (see blast_radius's callers, which do use a
+        thread pool). Confirmed by hand on this specific backend: the
+        exact same ~500 writes that complete with zero failures run
+        sequentially (in under a minute) start hitting the write-volume
+        ceiling within a second when fanned out across a 16-worker thread
+        pool -- concurrent writes appear to churn this SlateDB-backed
+        engine's un-GC'able manifest epochs much faster than the same
+        writes done one at a time, not just faster in wall-clock terms.
+        Slow-but-reliable beats fast-but-flaky here. Like the other
+        batch_* methods, does not preserve historical first_observed_at
+        across re-runs.
+        """
+        if not items:
+            return
+        resolved_isos = [(version_key, to_iso(resolved_at)) for version_key, resolved_at in items]
+        merge_rows = [
+            {
+                "a_id": stable_id(schema.APPLICATION, app_key),
+                "b_id": stable_id(schema.VERSION, version_key),
+                "rid": stable_id(schema.RESOLVED_VERSION_AT, app_key, version_key, resolved_iso),
+            }
+            for version_key, resolved_iso in resolved_isos
+        ]
+        for start in range(0, len(merge_rows), chunk_size):
+            chunk = merge_rows[start : start + chunk_size]
+            self._run(
+                f"UNWIND $rows AS row "
+                f"MATCH (a:{schema.APPLICATION} {{id: row.a_id}}), (b:{schema.VERSION} {{id: row.b_id}}) "
+                f"MERGE (a)-[r:{schema.RESOLVED_VERSION_AT} {{id: row.rid}}]->(b)",
+                rows=chunk,
+                write=True,
+            )
+
+        foa_iso = to_iso(first_observed_at)
+        et_iso = to_iso(event_time)
+
+        def _set_one(version_key: str, resolved_iso: str) -> None:
+            rid = stable_id(schema.RESOLVED_VERSION_AT, app_key, version_key, resolved_iso)
+            self._run(
+                f"MATCH (a:{schema.APPLICATION} {{key: $a_key}})-[r:{schema.RESOLVED_VERSION_AT} {{id: $rid}}]->"
+                f"(b:{schema.VERSION} {{key: $b_key}}) "
+                f"SET r.rel_id = $rid, r.first_observed_at = $foa, r.event_time = $et, "
+                f"r.resolved_at = $resolved_at, r.superseded_at = $open",
+                a_key=app_key,
+                b_key=version_key,
+                rid=rid,
+                foa=foa_iso,
+                et=et_iso,
+                resolved_at=resolved_iso,
+                open=schema.OPEN_INTERVAL_SENTINEL,
+                write=True,
+            )
+
+        for version_key, resolved_iso in resolved_isos:
+            _set_one(version_key, resolved_iso)
+        log.info("graph write: RESOLVED_VERSION_AT batch resolved", extra={"app_key": app_key, "count": len(items)})
 
     def supersede_version(
         self,

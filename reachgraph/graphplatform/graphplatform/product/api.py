@@ -15,7 +15,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from ..query.service import QueryReasoningService
-from ..write_service import GraphWriteService
+from ..write_service import GraphWriteService, HydraDBWriteCeilingExceeded
 from .lookup import PackageLookupService
 from .scanner import RepoScannerService
 
@@ -64,6 +64,24 @@ class ProductAPIHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
+        try:
+            self._do_GET()
+        except HydraDBWriteCeilingExceeded as exc:
+            self._send_json(503, {"error": "hydradb_write_ceiling_exceeded", "message": str(exc)})
+        except Exception:
+            log.exception("unhandled error in GET %s", self.path)
+            self._send_json(500, {"error": "internal_error"})
+
+    def do_POST(self) -> None:
+        try:
+            self._do_POST()
+        except HydraDBWriteCeilingExceeded as exc:
+            self._send_json(503, {"error": "hydradb_write_ceiling_exceeded", "message": str(exc)})
+        except Exception:
+            log.exception("unhandled error in POST %s", self.path)
+            self._send_json(500, {"error": "internal_error"})
+
+    def _do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
         qs = parse_qs(parsed.query)
@@ -115,7 +133,7 @@ class ProductAPIHandler(BaseHTTPRequestHandler):
 
         self._send_json(404, {"error": "endpoint_not_found", "path": path})
 
-    def do_POST(self) -> None:
+    def _do_POST(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
         body = self._read_json()

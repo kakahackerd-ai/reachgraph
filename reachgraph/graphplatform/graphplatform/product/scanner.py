@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
@@ -23,6 +24,18 @@ from ..query.service import QueryReasoningService
 from ..write_service import GraphWriteService
 
 log = logging.getLogger("graphplatform.product.scanner")
+
+# blast_radius is a handful of sequential Bolt round trips per call (a BFS,
+# not a single query); a repo with a few hundred unique resolved
+# dependencies made this loop the dominant cost when it ran one at a time.
+# Each call is read-only against a different package/version key, so
+# there's no ordering or write-conflict concern running them concurrently
+# -- and unlike writes (see write_service.py's resolve_versions_batch
+# docstring: concurrent writes on this backend hit its write-volume
+# ceiling far sooner than the same writes done sequentially, confirmed by
+# hand), concurrent reads were confirmed safe the same way: 300 concurrent
+# blast_radius calls with zero failures.
+_BLAST_RADIUS_CONCURRENCY = 16
 
 
 @dataclass
@@ -136,7 +149,6 @@ class RepoScannerService:
             # 2. For each discovered dependency, compute its in-repo blast radius
             job.progress = "Computing in-repo blast radius per dependency..."
             total_deps = 0
-            dependency_options: list[dict[str, Any]] = []
             all_resolved_pkgs: set[str] = set()
 
             def app_key_for(sub: Any) -> str:
@@ -147,29 +159,39 @@ class RepoScannerService:
                 for sub in disc_res.sub_packages
             ]
 
+            # De-dup pass first (cheap, sequential, preserves "first
+            # occurrence's subpath wins" semantics), then fan the expensive
+            # blast_radius calls out across a thread pool.
+            unique_deps: list[tuple[Any, str, str]] = []
             for sub in disc_res.sub_packages:
                 for pkg_name, ver in sub.resolved.items():
                     total_deps += 1
                     pkg_key = f"{sub.ecosystem}:{pkg_name}"
-                    ver_key = f"{sub.ecosystem}:{pkg_name}@{ver}"
                     if pkg_key in all_resolved_pkgs:
                         continue
                     all_resolved_pkgs.add(pkg_key)
+                    unique_deps.append((sub, pkg_name, ver))
 
-                    blast = self.query_service.blast_radius(ver_key, consistency="causal")
-                    in_repo_affected = [
-                        s.subpath or "(root)"
-                        for s in disc_res.sub_packages
-                        if app_key_for(s) in blast.applications
-                    ]
-                    dependency_options.append({
-                        "package_key": pkg_key,
-                        "name": pkg_name,
-                        "ecosystem": sub.ecosystem,
-                        "subpath": sub.subpath or "(root)",
-                        "in_repo_blast_radius": in_repo_affected,
-                        "total_blast_reach": blast.total_reached,
-                    })
+            def _compute_option(item: tuple[Any, str, str]) -> dict[str, Any]:
+                sub, pkg_name, ver = item
+                ver_key = f"{sub.ecosystem}:{pkg_name}@{ver}"
+                blast = self.query_service.blast_radius(ver_key, consistency="causal")
+                in_repo_affected = [
+                    s.subpath or "(root)"
+                    for s in disc_res.sub_packages
+                    if app_key_for(s) in blast.applications
+                ]
+                return {
+                    "package_key": f"{sub.ecosystem}:{pkg_name}",
+                    "name": pkg_name,
+                    "ecosystem": sub.ecosystem,
+                    "subpath": sub.subpath or "(root)",
+                    "in_repo_blast_radius": in_repo_affected,
+                    "total_blast_reach": blast.total_reached,
+                }
+
+            with ThreadPoolExecutor(max_workers=_BLAST_RADIUS_CONCURRENCY) as pool:
+                dependency_options = list(pool.map(_compute_option, unique_deps))
 
             report = {
                 "org": org,
