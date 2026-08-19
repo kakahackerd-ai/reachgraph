@@ -16,9 +16,11 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
+from ..ingestion.codegraph.import_scan import scan_directory_for_imports
 from ..ingestion.manifest.service import discover_and_ingest
 from ..query.service import QueryReasoningService
 from ..write_service import GraphWriteService
@@ -146,11 +148,6 @@ class RepoScannerService:
             job.progress = "Ingesting repository workspaces into HydraDB..."
             disc_res = discover_and_ingest(local_path, org=org, repo=repo, write_service=self.write_service)
 
-            # 2. For each discovered dependency, compute its in-repo blast radius
-            job.progress = "Computing in-repo blast radius per dependency..."
-            total_deps = 0
-            all_resolved_pkgs: set[str] = set()
-
             def app_key_for(sub: Any) -> str:
                 return f"{org}/{repo}/{sub.subpath}" if sub.subpath else f"{org}/{repo}"
 
@@ -158,6 +155,48 @@ class RepoScannerService:
                 {"application_key": app_key_for(sub), "subpath": sub.subpath, "ecosystem": sub.ecosystem, "resolved_count": len(sub.resolved)}
                 for sub in disc_res.sub_packages
             ]
+
+            # 1b. File-level import scan: which files import which of this
+            # sub-package's resolved dependencies. Package-key -> set of
+            # repo-relative file paths, merged across sub-packages (a
+            # dependency shared by two sub-packages accumulates importers
+            # from both). Written into HydraDB as File nodes plus
+            # Application-[:CONTAINS]->File and File-[:IMPORTS]->Package
+            # edges (batched -- see write_service.py) so get_importers_of
+            # works for any package_key later, not just the ones surfaced
+            # in this scan's own response.
+            job.progress = "Scanning files for dependency imports..."
+            importers_by_package: dict[str, set[str]] = {}
+            file_rows: list[tuple[str, str, str]] = []
+            contains_rows: list[tuple[str, str]] = []
+            imports_rows: list[tuple[str, str]] = []
+            seen_file_keys: set[str] = set()
+
+            for sub in disc_res.sub_packages:
+                if not sub.resolved:
+                    continue
+                app_key = app_key_for(sub)
+                known_names = set(sub.resolved.keys())
+                for fi in scan_directory_for_imports(Path(local_path), sub.subpath, sub.ecosystem, known_names):
+                    file_key = f"{org}/{repo}:{fi.file_path}"
+                    package_key = f"{sub.ecosystem}:{fi.package_name}"
+                    importers_by_package.setdefault(package_key, set()).add(fi.file_path)
+                    if file_key not in seen_file_keys:
+                        seen_file_keys.add(file_key)
+                        file_rows.append((file_key, fi.file_path, app_key))
+                        contains_rows.append((app_key, file_key))
+                    imports_rows.append((file_key, package_key))
+
+            if file_rows:
+                now_ts = datetime.now(timezone.utc)
+                self.write_service.upsert_files_batch(file_rows, first_observed_at=now_ts, event_time=now_ts)
+                self.write_service.write_contains_batch_merge_only(contains_rows)
+                self.write_service.write_imports_batch_merge_only(imports_rows)
+
+            # 2. For each discovered dependency, compute its in-repo blast radius
+            job.progress = "Computing in-repo blast radius per dependency..."
+            total_deps = 0
+            all_resolved_pkgs: set[str] = set()
 
             # De-dup pass first (cheap, sequential, preserves "first
             # occurrence's subpath wins" semantics), then fan the expensive
@@ -181,13 +220,17 @@ class RepoScannerService:
                     for s in disc_res.sub_packages
                     if app_key_for(s) in blast.applications
                 ]
+                pkg_key = f"{sub.ecosystem}:{pkg_name}"
+                importing_files = sorted(importers_by_package.get(pkg_key, ()))
                 return {
-                    "package_key": f"{sub.ecosystem}:{pkg_name}",
+                    "package_key": pkg_key,
                     "name": pkg_name,
                     "ecosystem": sub.ecosystem,
                     "subpath": sub.subpath or "(root)",
                     "in_repo_blast_radius": in_repo_affected,
                     "total_blast_reach": blast.total_reached,
+                    "importing_files": importing_files,
+                    "importing_files_count": len(importing_files),
                 }
 
             with ThreadPoolExecutor(max_workers=_BLAST_RADIUS_CONCURRENCY) as pool:

@@ -77,6 +77,8 @@ export interface DependencyOption {
   subpath: string
   in_repo_blast_radius: string[]
   total_blast_reach: number
+  importing_files: string[]
+  importing_files_count: number
 }
 
 export interface ScanResult {

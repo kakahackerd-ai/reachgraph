@@ -136,6 +136,29 @@ export default function RepoScreen() {
                 </div>
               </div>
             )}
+
+            {selectedOption && (
+              <div className="field-group">
+                <span className="field-label">
+                  Imported in {selectedOption.importing_files_count} file
+                  {selectedOption.importing_files_count === 1 ? '' : 's'}
+                </span>
+                {selectedOption.importing_files.length > 0 ? (
+                  <div className="dep-list">
+                    {selectedOption.importing_files.map((path) => (
+                      <div key={path} className="dep-item" style={{ cursor: 'default' }}>
+                        <span className="name">{path}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p style={{ fontSize: 13 }}>
+                    No direct imports of this dependency found in scanned source files — it may only be a
+                    transitive dependency of something else in the repo.
+                  </p>
+                )}
+              </div>
+            )}
           </>
         )}
       </aside>

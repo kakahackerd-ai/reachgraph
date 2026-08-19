@@ -378,6 +378,88 @@ class GraphWriteService:
             )
         log.info("graph write: DEPENDS_ON batch merged", extra={"source_label": source_label, "count": len(rows)})
 
+    def upsert_files_batch(
+        self,
+        items: list[tuple[str, str, str]],  # (key, path, application_key)
+        *,
+        first_observed_at: datetime,
+        event_time: datetime,
+    ) -> None:
+        rows = [
+            {
+                "id": stable_id(schema.FILE, key),
+                "key": key,
+                "path": path,
+                "application_key": application_key,
+                "first_observed_at": to_iso(first_observed_at),
+                "event_time": to_iso(event_time),
+            }
+            for key, path, application_key in items
+        ]
+        self._upsert_nodes_batch(schema.FILE, rows)
+
+    def write_contains_batch_merge_only(
+        self,
+        items: list[tuple[str, str]],  # (application_key, file_key)
+        *,
+        chunk_size: int = 500,
+    ) -> None:
+        """Bulk MERGE-only CONTAINS writes (Application -> File). See
+        write_depends_on_batch_merge_only's docstring -- same shape, same
+        trade-off (no rel_id/timestamp SET), safe because nothing reads
+        CONTAINS edge properties."""
+        if not items:
+            return
+        rows = [
+            {
+                "a_id": stable_id(schema.APPLICATION, app_key),
+                "b_id": stable_id(schema.FILE, file_key),
+                "rid": stable_id(schema.CONTAINS, app_key, file_key),
+            }
+            for app_key, file_key in items
+        ]
+        for start in range(0, len(rows), chunk_size):
+            chunk = rows[start : start + chunk_size]
+            self._run(
+                f"UNWIND $rows AS row "
+                f"MATCH (a:{schema.APPLICATION} {{id: row.a_id}}), (b:{schema.FILE} {{id: row.b_id}}) "
+                f"MERGE (a)-[r:{schema.CONTAINS} {{id: row.rid}}]->(b)",
+                rows=chunk,
+                write=True,
+            )
+        log.info("graph write: CONTAINS batch merged", extra={"count": len(rows)})
+
+    def write_imports_batch_merge_only(
+        self,
+        items: list[tuple[str, str]],  # (file_key, package_key)
+        *,
+        chunk_size: int = 500,
+    ) -> None:
+        """Bulk MERGE-only IMPORTS writes (File -> Package). See
+        write_depends_on_batch_merge_only's docstring -- same shape, same
+        trade-off; get_importers_of matches by relationship type and
+        endpoint keys only."""
+        if not items:
+            return
+        rows = [
+            {
+                "a_id": stable_id(schema.FILE, file_key),
+                "b_id": stable_id(schema.PACKAGE, package_key),
+                "rid": stable_id(schema.IMPORTS, file_key, package_key),
+            }
+            for file_key, package_key in items
+        ]
+        for start in range(0, len(rows), chunk_size):
+            chunk = rows[start : start + chunk_size]
+            self._run(
+                f"UNWIND $rows AS row "
+                f"MATCH (a:{schema.FILE} {{id: row.a_id}}), (b:{schema.PACKAGE} {{id: row.b_id}}) "
+                f"MERGE (a)-[r:{schema.IMPORTS} {{id: row.rid}}]->(b)",
+                rows=chunk,
+                write=True,
+            )
+        log.info("graph write: IMPORTS batch merged", extra={"count": len(rows)})
+
     def _annotate_node(self, label: str, key: str, properties: dict[str, Any]) -> None:
         """Set additional properties on an existing node without touching
         its core identity fields or timestamp discipline -- for enrichment
