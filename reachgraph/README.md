@@ -59,9 +59,8 @@ Run the test suite from `graphplatform/`: `pytest -v` (see `graphplatform/README
 ## Status
 
 - [x] HydraDB schema + write service (Package/Version/Maintainer/Application/File, DEPENDS_ON/RESOLVED_VERSION_AT/PUBLISHED_BY/CONTAINS/IMPORTS)
-- [x] Package lookup + blast radius over whatever's already ingested (`/api/v2/lookup`)
+- [x] **Flow 1 complete**: real GitHub `network/dependents` scrape + deps.dev counts feed `/api/v2/lookup`, which resolves metadata, writes real dependents into HydraDB, and returns package info + a `{nodes,edges}` blast-radius graph — verified live end-to-end
 - [x] Repo clone + monorepo manifest discovery + per-dependency in-repo blast radius (`/api/v2/scan-repo`) — verified live end-to-end
-- [ ] GitHub dependents scrape (real reverse-dependency source for Flow 1 — `/api/v2/lookup` currently has no way to discover *who* depends on a package, only to compute blast radius once dependents are already in the graph)
 - [ ] GitNexus-driven file/import graph for Flow 2 (`gitnexus analyze` + File/IMPORTS edges)
 - [ ] `/api/v2/repo/blast-radius` (blast radius of a user-picked dependency from the built repo graph)
 - [ ] React + Three.js frontend (intro scene, 3D graph views for both flows)
