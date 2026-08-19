@@ -15,7 +15,9 @@ graphplatform/
     models.py            result dataclasses
   ingestion/
     registry/            npm + PyPI metadata/version connectors
+    dependents/           github_scrape.py -- GitHub network/dependents scrape + deps.dev counts (Flow 1)
     manifest/             monorepo/workspace manifest discovery (npm/yarn/pnpm/poetry) + ingest
+    codegraph/             import_scan.py (static per-file import scan) + gitnexus_client.py (real gitnexus CLI integration) -- Flow 2
     writer.py             GraphIngestionWriter -- turns queue events into GraphWriteService calls
     events.py, queue.py   event shapes + Redis Streams queue
   product/
@@ -31,7 +33,7 @@ tests/                    integration tests against a real running HydraDB (no m
 Nodes: `Package`, `Version`, `Maintainer`, `Application`, `File`.
 Relationships: `DEPENDS_ON`, `RESOLVED_VERSION_AT`, `PUBLISHED_BY`, `CONTAINS`, `IMPORTS`.
 
-`Application` represents either a real GitHub repo/subpackage (`org/repo[/subpath]`) that resolves package versions, or — once the GitHub dependents scrape lands — a package that declares a dependency on another package. `File` + `IMPORTS` (Application → File via `CONTAINS`, File → Package via `IMPORTS`) is the substrate for Flow 2's per-file import graph, populated by the `gitnexus` CLI integration (in progress).
+`Application` represents either a real GitHub repo/subpackage (`org/repo[/subpath]`) that resolves package versions, or a repo scraped off GitHub's `network/dependents` page (Flow 1). `File` (`Application` -[:CONTAINS]-> `File` -[:IMPORTS]-> `Package`) is Flow 2's per-file import graph, populated by `ingestion/codegraph/import_scan.py`'s static scan. The real `gitnexus` CLI (`ingestion/codegraph/gitnexus_client.py`) supplies a separate, complementary layer on top: its own local (intra-repo) file-to-file `IMPORTS` graph, walked in Python (not persisted to HydraDB) to expand "files that directly import X" into "files reachable from an importer of X through the repo's own local call chain." Confirmed by hand that gitnexus itself has no concept of external package dependencies at all -- it never creates a node for one, even with the package installed in `node_modules` -- so it complements import_scan.py rather than replacing it.
 
 ## Blast radius
 
@@ -76,4 +78,6 @@ podman start hydradb-graphplatform
 
 If instead you see plain `Permission denied` writing to `_coordination/v1` after a container restart, that's the rootless-podman uid-10001 mismatch, not the GC ceiling — `sudo chmod -R a+rwX setup/hydra-db-data/store setup/hydra-db-data/cache` fixes it (the uid falls outside the host user's subuid range, so `podman unshare` doesn't help here).
 
-Because of the ceiling above, both product flows deliberately cap how much they write per request: repo scans dedupe by package key, and the (in-progress) GitHub dependents scrape caps at roughly 100 dependents per lookup rather than trying to ingest a popular package's full reverse-dependency set.
+Because of the ceiling above, both product flows deliberately cap how much they write per request: repo scans dedupe by package key and cap resolved dependencies per sub-package (`ingestion/manifest/service.py`'s `_DEFAULT_MAX_RESOLVED_PER_SUBPACKAGE`), and the GitHub dependents scrape caps at `max_dependents` (default 100) per lookup rather than trying to ingest a popular package's full reverse-dependency set. `write_service.py`'s bulk `*_batch` methods (used by both flows' hot paths) exist because of this ceiling too -- HydraDB only accelerates two write shapes under `UNWIND` (single-node `MERGE+SET` matched by `id`, two-endpoint relationship `MERGE` matched by `id`; there is no batched-read path at all), and **concurrent writes hit the ceiling far sooner than the same writes done sequentially** (confirmed by hand: 500 relationship `SET`s through a 16-worker pool failed within a second; the same 500 done one at a time took ~38s with zero failures) -- never thread-pool a write path here, only reads.
+
+**gitnexus indexes into a global, machine-wide registry, not one scoped to the repo being analyzed.** `gitnexus list` shows every repo ever analyzed on the box. Once more than one repo has been indexed, a bare `gitnexus cypher` fails ("Multiple repositories indexed"); `gitnexus_client.py` always resolves an explicit `--repo` first. The registry key is **not** the directory basename either -- gitnexus derives it itself (usually from `package.json`'s `name` field), so a checkout at `.../serve-clone` registers as plain `"serve"`. `_resolve_repo_name()` handles this by parsing `gitnexus list`'s output and matching on its `Path:` field rather than guessing.
