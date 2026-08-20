@@ -3,14 +3,14 @@ import ForceGraph3D, { type ForceGraphMethods } from 'react-force-graph-3d'
 import type { GraphData, GraphEdge, GraphNode } from '../lib/types'
 
 const LABEL_COLOR: Record<string, string> = {
-  Package: '#22d3ee',
-  Version: '#22d3ee',
-  Application: '#a78bfa',
-  File: '#fb923c',
+  Package: '#5b8fef',
+  Version: '#5b8fef',
+  Application: '#9c8cf0',
+  File: '#e0ab52',
 }
 
-const DIM_COLOR = 'rgba(148, 163, 184, 0.25)'
-const SOURCE_COLOR = '#f8fafc'
+const DIM_COLOR = 'rgba(148, 141, 133, 0.22)'
+const SOURCE_COLOR = '#ff6a3d'
 
 function endpointId(endpoint: unknown): string {
   if (endpoint && typeof endpoint === 'object' && 'id' in endpoint) {
@@ -92,14 +92,14 @@ export default function GraphView({ graph, sourceKey, highlightKeys, onNodeClick
           const s = endpointId(l.source)
           const t = endpointId(l.target)
           if (emphasized && (!highlightKeys!.has(s) || !highlightKeys!.has(t))) {
-            return 'rgba(100, 116, 139, 0.12)'
+            return 'rgba(120, 113, 105, 0.12)'
           }
-          return 'rgba(34, 211, 238, 0.35)'
+          return 'rgba(255, 138, 92, 0.3)'
         }}
         linkWidth={0.6}
         linkDirectionalParticles={emphasized ? 2 : 0}
         linkDirectionalParticleWidth={1.6}
-        linkDirectionalParticleColor={() => '#fb923c'}
+        linkDirectionalParticleColor={() => '#ff6a3d'}
         onNodeClick={(n) => onNodeClick?.(n.key)}
         enableNodeDrag={false}
       />

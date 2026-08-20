@@ -52,33 +52,42 @@ export default function RepoScreen() {
   }
 
   const sorted = result ? [...result.dependency_options].sort((a, b) => b.total_blast_reach - a.total_blast_reach) : []
+  const extraLocal = selectedOption
+    ? selectedOption.locally_affected_files.filter((p) => !selectedOption.importing_files.includes(p))
+    : []
 
   return (
-    <div className="data-screen">
-      <aside className="data-sidebar">
-        <div>
-          <h1 className="data-title">Repository blast radius</h1>
-          <p className="data-subtitle">
-            Enter a GitHub repo URL — monorepos with multiple package.json/requirements.txt files are
-            supported. We clone it, discover every manifest, and build its dependency graph.
-          </p>
-        </div>
+    <div className="stage">
+      <div className="stage-graph">
+        {graph ? (
+          <GraphView graph={graph} highlightKeys={highlightKeys} onNodeClick={setSelectedDep} />
+        ) : (
+          <div className="stage-empty">
+            {phase === 'scanning'
+              ? 'Cloning and discovering manifests…'
+              : 'Scan a repository to build its dependency graph.'}
+          </div>
+        )}
+      </div>
 
-        <form className="field-group" onSubmit={onSubmit}>
-          <div className="field-group">
-            <span className="field-label">GitHub repository</span>
+      <div className="dock dock-top">
+        <div className="dock-top-row">
+          <div className="dock-heading">
+            <h1>Repository blast radius</h1>
+            <p>Monorepo-aware — every package.json / requirements.txt, cloned and cross-referenced.</p>
+          </div>
+          <form className="command-form" onSubmit={onSubmit}>
             <input
-              className="text-input"
+              className="text-input wide"
               placeholder="https://github.com/owner/repo"
               value={target}
               onChange={(e) => setTarget(e.target.value)}
             />
-          </div>
-          <button className="primary-btn" type="submit" disabled={phase === 'scanning' || !target.trim()}>
-            {phase === 'scanning' ? 'Scanning…' : 'Build dependency graph'}
-          </button>
-        </form>
-
+            <button className="primary-btn" type="submit" disabled={phase === 'scanning' || !target.trim()}>
+              {phase === 'scanning' ? 'Scanning…' : 'Build graph'}
+            </button>
+          </form>
+        </div>
         {phase === 'scanning' && (
           <div className="status-line">
             <span className="status-dot running" />
@@ -86,9 +95,12 @@ export default function RepoScreen() {
           </div>
         )}
         {error && <div className="error-box">{error}</div>}
+      </div>
 
-        {result && (
-          <>
+      {result && (
+        <div className="dock-col-left">
+          <div className="dock">
+            <div className="dock-title">Repository</div>
             <div className="stat-grid">
               <div className="stat-card">
                 <div className="value">{result.unique_packages}</div>
@@ -99,99 +111,79 @@ export default function RepoScreen() {
                 <div className="label">sub-packages</div>
               </div>
             </div>
-
-            <div className="field-group">
-              <span className="field-label">
-                {selectedOption ? 'Selected dependency' : 'Pick a dependency for its blast radius'}
-              </span>
-              <div className="dep-list">
-                {sorted.map((dep) => (
-                  <button
-                    key={dep.package_key}
-                    type="button"
-                    className={`dep-item${selectedDep === dep.package_key ? ' selected' : ''}`}
-                    onClick={() => setSelectedDep(selectedDep === dep.package_key ? null : dep.package_key)}
-                  >
-                    <span className="name">{dep.name}</span>
-                    <span className="reach">{dep.total_blast_reach} reached</span>
-                  </button>
-                ))}
-                {sorted.length === 0 && <p style={{ fontSize: 13 }}>No resolved dependencies found (no lockfile?).</p>}
-              </div>
-            </div>
-
-            {selectedOption && (
-              <div className="info-card">
-                <div className="info-row">
-                  <span className="k">dependency</span>
-                  <span className="v">{selectedOption.name}</span>
-                </div>
-                <div className="info-row">
-                  <span className="k">ecosystem</span>
-                  <span className="v">{selectedOption.ecosystem}</span>
-                </div>
-                <div className="info-row">
-                  <span className="k">affects</span>
-                  <span className="v">{selectedOption.in_repo_blast_radius.join(', ') || '—'}</span>
-                </div>
-              </div>
-            )}
-
-            {selectedOption && (
-              <div className="field-group">
-                <span className="field-label">
-                  Imported in {selectedOption.importing_files_count} file
-                  {selectedOption.importing_files_count === 1 ? '' : 's'}
-                </span>
-                {selectedOption.importing_files.length > 0 ? (
-                  <div className="dep-list">
-                    {selectedOption.importing_files.map((path) => (
-                      <div key={path} className="dep-item" style={{ cursor: 'default' }}>
-                        <span className="name">{path}</span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p style={{ fontSize: 13 }}>
-                    No direct imports of this dependency found in scanned source files — it may only be a
-                    transitive dependency of something else in the repo.
-                  </p>
-                )}
-              </div>
-            )}
-
-            {selectedOption && (() => {
-              const extra = selectedOption.locally_affected_files.filter(
-                (p) => !selectedOption.importing_files.includes(p),
-              )
-              return extra.length > 0 ? (
-                <div className="field-group">
-                  <span className="field-label">Also reachable via local calls (gitnexus)</span>
-                  <div className="dep-list">
-                    {extra.map((path) => (
-                      <div key={path} className="dep-item" style={{ cursor: 'default' }}>
-                        <span className="name">{path}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null
-            })()}
-          </>
-        )}
-      </aside>
-
-      <div className="graph-pane">
-        {graph ? (
-          <GraphView graph={graph} highlightKeys={highlightKeys} onNodeClick={setSelectedDep} />
-        ) : (
-          <div className="graph-empty">
-            {phase === 'scanning'
-              ? 'Cloning and discovering manifests…'
-              : 'Scan a repository to build its dependency graph.'}
           </div>
-        )}
-      </div>
+
+          <div className="dock grow">
+            <div className="dock-title">
+              {selectedOption ? 'Selected dependency' : 'Pick a dependency for its blast radius'}
+            </div>
+            <div className="dep-list">
+              {sorted.map((dep) => (
+                <button
+                  key={dep.package_key}
+                  type="button"
+                  className={`dep-item${selectedDep === dep.package_key ? ' selected' : ''}`}
+                  onClick={() => setSelectedDep(selectedDep === dep.package_key ? null : dep.package_key)}
+                >
+                  <span className="name">{dep.name}</span>
+                  <span className="reach">{dep.total_blast_reach} reached</span>
+                </button>
+              ))}
+              {sorted.length === 0 && <p style={{ fontSize: 13 }}>No resolved dependencies found (no lockfile?).</p>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {selectedOption && (
+        <div className="dock dock-bottom-right">
+          <div className="dock-title">{selectedOption.name}</div>
+          <div className="info-card" style={{ background: 'transparent', border: 'none', padding: 0, marginBottom: 12 }}>
+            <div className="info-row">
+              <span className="k">ecosystem</span>
+              <span className="v">{selectedOption.ecosystem}</span>
+            </div>
+            <div className="info-row">
+              <span className="k">affects</span>
+              <span className="v">{selectedOption.in_repo_blast_radius.join(', ') || '—'}</span>
+            </div>
+          </div>
+
+          <div className="dock-title" style={{ marginTop: 4 }}>
+            Imported directly
+            <span style={{ color: 'var(--text-faint)', fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>
+              {' '}
+              · {selectedOption.importing_files_count} file{selectedOption.importing_files_count === 1 ? '' : 's'}
+            </span>
+          </div>
+          {selectedOption.importing_files.length > 0 ? (
+            <div className="dep-list" style={{ marginBottom: extraLocal.length ? 14 : 0 }}>
+              {selectedOption.importing_files.map((path) => (
+                <div key={path} className="dep-item" style={{ cursor: 'default' }}>
+                  <span className="name">{path}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>
+              No direct imports found in scanned source — likely only a transitive dependency.
+            </p>
+          )}
+
+          {extraLocal.length > 0 && (
+            <>
+              <div className="dock-title">Also reachable via local calls (gitnexus)</div>
+              <div className="dep-list">
+                {extraLocal.map((path) => (
+                  <div key={path} className="dep-item" style={{ cursor: 'default' }}>
+                    <span className="name">{path}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </div>
   )
 }

@@ -44,21 +44,32 @@ export default function PackageScreen() {
   const pkg = result?.package
   const blast = result?.blast_radius
   const dependents = result?.dependents
+  const directPct =
+    dependents && dependents.known_total
+      ? Math.min(100, Math.max(2, ((dependents.direct_known ?? 0) / dependents.known_total) * 100))
+      : 50
 
   return (
-    <div className="data-screen">
-      <aside className="data-sidebar">
-        <div>
-          <h1 className="data-title">Package blast radius</h1>
-          <p className="data-subtitle">
-            Enter an npm or PyPI package name. We resolve its real registry metadata, scrape who
-            actually depends on it off GitHub, and store that graph in HydraDB.
-          </p>
-        </div>
+    <div className="stage">
+      <div className="stage-graph">
+        {result?.graph ? (
+          <GraphView graph={result.graph} sourceKey={blast?.source_key} onNodeClick={setSelected} />
+        ) : (
+          <div className="stage-empty">
+            {loading
+              ? 'Resolving metadata, scraping dependents, computing blast radius…'
+              : 'Look up a package to see its blast radius in 3D.'}
+          </div>
+        )}
+      </div>
 
-        <form className="field-group" onSubmit={onSubmit}>
-          <div className="field-group">
-            <span className="field-label">Ecosystem</span>
+      <div className="dock dock-top">
+        <div className="dock-top-row">
+          <div className="dock-heading">
+            <h1>Package blast radius</h1>
+            <p>Real registry metadata, real GitHub dependents, walked outward through HydraDB.</p>
+          </div>
+          <form className="command-form" onSubmit={onSubmit}>
             <div className="eco-toggle">
               <button type="button" className={ecosystem === 'npm' ? 'active' : ''} onClick={() => setEcosystem('npm')}>
                 npm
@@ -67,99 +78,97 @@ export default function PackageScreen() {
                 PyPI
               </button>
             </div>
-          </div>
-
-          <div className="field-group">
-            <span className="field-label">Package name</span>
             <input
               className="text-input"
               placeholder={ecosystem === 'npm' ? 'e.g. chalk' : 'e.g. requests'}
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
-          </div>
-
-          <div className="field-group">
-            <span className="field-label">Version (optional)</span>
             <input
               className="text-input"
-              placeholder="latest"
+              style={{ width: 120 }}
+              placeholder="version"
               value={version}
               onChange={(e) => setVersion(e.target.value)}
             />
-          </div>
-
-          <button className="primary-btn" type="submit" disabled={loading || !name.trim()}>
-            {loading ? 'Tracing blast radius…' : 'Compute blast radius'}
-          </button>
-        </form>
-
+            <button className="primary-btn" type="submit" disabled={loading || !name.trim()}>
+              {loading ? 'Tracing…' : 'Trace'}
+            </button>
+          </form>
+        </div>
         {error && <div className="error-box">{error}</div>}
-
-        {pkg && (
-          <div className="info-card">
-            <div className="info-row">
-              <span className="k">package</span>
-              <span className="v">{pkg.name}</span>
-            </div>
-            <div className="info-row">
-              <span className="k">ecosystem</span>
-              <span className="v">{pkg.ecosystem}</span>
-            </div>
-            <div className="info-row">
-              <span className="k">version</span>
-              <span className="v">{pkg.version ?? '—'}</span>
-            </div>
-            <div className="info-row">
-              <span className="k">repository</span>
-              <span className="v">{pkg.repository ?? 'unknown'}</span>
-            </div>
-          </div>
-        )}
-
-        {blast && (
-          <div className="stat-grid">
-            <div className="stat-card">
-              <div className="value">{blast.total_reached}</div>
-              <div className="label">nodes reached</div>
-            </div>
-            <div className="stat-card">
-              <div className="value">{blast.max_depth}</div>
-              <div className="label">max depth</div>
-            </div>
-            <div className="stat-card">
-              <div className="value">{dependents?.shown ?? 0}</div>
-              <div className="label">dependents shown</div>
-            </div>
-            <div className="stat-card">
-              <div className="value">{dependents?.known_total ?? '—'}</div>
-              <div className="label">known on deps.dev</div>
-            </div>
-          </div>
-        )}
-      </aside>
-
-      <div className="graph-pane">
-        {result?.graph ? (
-          <>
-            <GraphView graph={result.graph} sourceKey={blast?.source_key} onNodeClick={setSelected} />
-            {selected && (
-              <div className="node-detail">
-                <button className="close" onClick={() => setSelected(null)}>
-                  ×
-                </button>
-                <div className="k">{selected}</div>
-              </div>
-            )}
-          </>
-        ) : (
-          <div className="graph-empty">
-            {loading
-              ? 'Resolving metadata, scraping dependents, computing blast radius…'
-              : 'Look up a package to see its blast radius in 3D.'}
-          </div>
-        )}
       </div>
+
+      {pkg && (
+        <div className="dock-col-left">
+          <div className="dock">
+            <div className="dock-title">Package</div>
+            <div className="info-card" style={{ background: 'transparent', border: 'none', padding: 0 }}>
+              <div className="info-row">
+                <span className="k">name</span>
+                <span className="v">{pkg.name}</span>
+              </div>
+              <div className="info-row">
+                <span className="k">ecosystem</span>
+                <span className="v">{pkg.ecosystem}</span>
+              </div>
+              <div className="info-row">
+                <span className="k">version</span>
+                <span className="v">{pkg.version ?? '—'}</span>
+              </div>
+              <div className="info-row">
+                <span className="k">repository</span>
+                <span className="v">{pkg.repository ?? 'unknown'}</span>
+              </div>
+            </div>
+          </div>
+
+          {blast && (
+            <div className="dock">
+              <div className="dock-title">Blast radius</div>
+              <div className="stat-grid">
+                <div className="stat-card">
+                  <div className="value">{blast.total_reached}</div>
+                  <div className="label">nodes reached</div>
+                </div>
+                <div className="stat-card">
+                  <div className="value">{blast.max_depth}</div>
+                  <div className="label">max depth</div>
+                </div>
+                <div className="stat-card">
+                  <div className="value">{dependents?.shown ?? 0}</div>
+                  <div className="label">dependents shown</div>
+                </div>
+                <div className="stat-card">
+                  <div className="value">{dependents?.known_total ?? '—'}</div>
+                  <div className="label">known on deps.dev</div>
+                </div>
+              </div>
+              {dependents && (
+                <>
+                  <div className="split-bar" style={{ marginTop: 12 }}>
+                    <span style={{ width: `${directPct}%`, background: 'var(--accent)' }} />
+                    <span style={{ width: `${100 - directPct}%`, background: 'var(--file)' }} />
+                  </div>
+                  <div className="split-legend">
+                    <span>direct · {dependents.direct_known}</span>
+                    <span>transitive · {dependents.indirect_known}</span>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {selected && (
+        <div className="dock node-detail">
+          <button className="close" onClick={() => setSelected(null)}>
+            ×
+          </button>
+          <div className="k">{selected}</div>
+        </div>
+      )}
     </div>
   )
 }

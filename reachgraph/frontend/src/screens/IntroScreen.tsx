@@ -20,7 +20,7 @@ export default function IntroScreen() {
 
         <div className="intro-cards">
           <Link to="/npm" className="intro-card">
-            <div className="intro-card-badge cyan">01</div>
+            <div className="intro-card-badge pkg">01</div>
             <h2>Package blast radius</h2>
             <p>
               Enter an npm or PyPI package. We pull its real registry metadata, scrape the packages
@@ -30,7 +30,7 @@ export default function IntroScreen() {
           </Link>
 
           <Link to="/repo" className="intro-card">
-            <div className="intro-card-badge violet">02</div>
+            <div className="intro-card-badge app">02</div>
             <h2>Repository blast radius</h2>
             <p>
               Enter a GitHub repo — monorepos included. We clone it, discover every manifest, build its
@@ -44,16 +44,16 @@ export default function IntroScreen() {
         <div className="intro-legend">
           <span className="legend-title">reading the graph</span>
           <span className="legend-item">
-            <i className="dot" style={{ background: '#f8fafc' }} /> source you searched
+            <i className="dot" style={{ background: '#ff6a3d' }} /> source you searched
           </span>
           <span className="legend-item">
-            <i className="dot" style={{ background: '#22d3ee' }} /> package
+            <i className="dot" style={{ background: '#5b8fef' }} /> package
           </span>
           <span className="legend-item">
-            <i className="dot" style={{ background: '#a78bfa' }} /> application / repo
+            <i className="dot" style={{ background: '#9c8cf0' }} /> application / repo
           </span>
           <span className="legend-item">
-            <i className="dot" style={{ background: '#fb923c' }} /> file
+            <i className="dot" style={{ background: '#e0ab52' }} /> file
           </span>
           <span className="legend-item">click a node for details · drag to rotate · scroll to zoom</span>
         </div>

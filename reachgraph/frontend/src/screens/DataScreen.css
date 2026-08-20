@@ -1,34 +1,169 @@
-.data-screen {
+/* ---------- stage: full-bleed graph with floating glass docks ---------- */
+
+.stage {
+  position: relative;
   flex: 1;
-  display: grid;
-  grid-template-columns: 360px 1fr;
   min-height: 0;
+  overflow: hidden;
 }
 
-@media (max-width: 900px) {
-  .data-screen {
-    grid-template-columns: 1fr;
-  }
+.stage-graph {
+  position: absolute;
+  inset: 0;
 }
 
-.data-sidebar {
-  border-right: 1px solid var(--border);
-  padding: 28px 24px;
+.stage-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 14.5px;
+  max-width: 420px;
+  margin: 0 auto;
+}
+
+.dock {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  backdrop-filter: blur(16px);
+  box-shadow: var(--shadow-lg);
+}
+
+/* top command bar */
+.dock-top {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  right: 20px;
+  z-index: 10;
+  padding: 16px 20px;
   display: flex;
   flex-direction: column;
-  gap: 22px;
+  gap: 12px;
+}
+
+.dock-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.dock-heading h1 {
+  font-size: 26px;
+}
+
+.dock-heading p {
+  font-size: 13px;
+  margin-top: 2px;
+  max-width: 46ch;
+}
+
+.command-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.command-form .text-input {
+  width: 220px;
+}
+
+.command-form .text-input.wide {
+  width: 340px;
+}
+
+/* left column: identity / dependency picker */
+.dock-col-left {
+  position: absolute;
+  left: 20px;
+  top: 100px;
+  bottom: 20px;
+  width: 300px;
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.dock-col-left > .dock {
+  padding: 16px;
+  flex: none;
+}
+
+.dock-col-left > .dock.grow {
+  flex: 1;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* bottom-right corner panel */
+.dock-bottom-right {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  width: 320px;
+  max-height: calc(100% - 140px);
+  z-index: 9;
+  padding: 16px;
   overflow-y: auto;
 }
 
-.data-title {
-  font-size: 22px;
-  margin-bottom: 4px;
+.dock-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+  font-weight: 600;
+  margin-bottom: 10px;
 }
 
-.data-subtitle {
-  font-size: 13.5px;
-  color: var(--text-dim);
+@media (max-width: 900px) {
+  .stage {
+    display: flex;
+    flex-direction: column;
+    overflow: visible;
+    overflow-y: auto;
+  }
+  .stage-graph {
+    position: relative;
+    inset: auto;
+    height: 46vh;
+    min-height: 320px;
+    order: 2;
+  }
+  .dock-top,
+  .dock-col-left,
+  .dock-bottom-right {
+    position: relative;
+    inset: auto;
+    left: auto;
+    right: auto;
+    top: auto;
+    bottom: auto;
+    width: auto;
+    max-height: none;
+    order: 1;
+    margin: 12px 16px 0;
+  }
+  .dock-bottom-right {
+    order: 3;
+  }
 }
+
+/* ---------- shared form controls (used inside docks) ---------- */
 
 .field-group {
   display: flex;
@@ -46,20 +181,19 @@
 
 .eco-toggle {
   display: flex;
-  gap: 6px;
+  gap: 4px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 4px;
+  border-radius: 9px;
+  padding: 3px;
 }
 
 .eco-toggle button {
-  flex: 1;
   border: none;
   background: transparent;
-  padding: 8px 0;
-  border-radius: 7px;
-  font-size: 13.5px;
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text-dim);
   cursor: pointer;
@@ -67,25 +201,24 @@
 }
 
 .eco-toggle button.active {
-  background: var(--cyan-dim);
-  color: var(--cyan);
+  background: var(--accent-dim);
+  color: var(--accent-ink);
 }
 
 .text-input {
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 11px 13px;
-  font-size: 14px;
+  border-radius: 9px;
+  padding: 10px 12px;
+  font-size: 13.5px;
   color: var(--text);
   font-family: var(--mono);
   outline: none;
   transition: border-color 0.15s;
-  width: 100%;
 }
 
 .text-input:focus {
-  border-color: var(--cyan);
+  border-color: var(--accent);
 }
 
 .text-input::placeholder {
@@ -94,15 +227,16 @@
 }
 
 .primary-btn {
-  background: var(--cyan);
-  color: #05070d;
+  background: var(--accent);
+  color: #1a0a04;
   border: none;
-  border-radius: 10px;
-  padding: 12px 16px;
-  font-size: 14.5px;
+  border-radius: 9px;
+  padding: 10px 18px;
+  font-size: 13.5px;
   font-weight: 700;
   cursor: pointer;
   transition: filter 0.15s, opacity 0.15s;
+  white-space: nowrap;
 }
 
 .primary-btn:hover {
@@ -110,7 +244,8 @@
 }
 
 .primary-btn:disabled {
-  opacity: 0.5;
+  background: var(--bg-raised);
+  color: var(--text-faint);
   cursor: default;
 }
 
@@ -129,12 +264,12 @@
   background: var(--text-faint);
 }
 .status-dot.running {
-  background: var(--amber);
-  box-shadow: 0 0 8px 1px var(--amber);
+  background: var(--file);
+  box-shadow: 0 0 8px 1px var(--file);
 }
 .status-dot.ok {
-  background: var(--cyan);
-  box-shadow: 0 0 8px 1px var(--cyan);
+  background: var(--accent);
+  box-shadow: 0 0 8px 1px var(--accent);
 }
 .status-dot.error {
   background: var(--red);
@@ -145,43 +280,65 @@
   border: 1px solid rgba(248, 113, 113, 0.35);
   background: rgba(248, 113, 113, 0.08);
   color: #fca5a5;
-  border-radius: 10px;
-  padding: 11px 13px;
+  border-radius: 9px;
+  padding: 10px 13px;
   font-size: 13px;
 }
 
 .stat-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  gap: 8px;
 }
 
 .stat-card {
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 12px 14px;
+  border-radius: 9px;
+  padding: 10px 12px;
 }
 
 .stat-card .value {
-  font-size: 20px;
-  font-weight: 700;
+  font-size: 19px;
+  font-weight: 600;
   font-family: var(--mono);
 }
 
 .stat-card .label {
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--text-faint);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   margin-top: 2px;
 }
 
+.split-bar {
+  height: 5px;
+  border-radius: 3px;
+  overflow: hidden;
+  display: flex;
+  background: var(--bg-raised);
+  margin-top: 2px;
+}
+
+.split-bar span {
+  display: block;
+  height: 100%;
+}
+
+.split-legend {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  margin-top: 4px;
+}
+
 .info-card {
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 14px;
+  border-radius: 9px;
+  padding: 12px;
   font-size: 13px;
   display: flex;
   flex-direction: column;
@@ -208,8 +365,7 @@
 .dep-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 320px;
+  gap: 5px;
   overflow-y: auto;
 }
 
@@ -220,8 +376,8 @@
   gap: 10px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 10px 12px;
+  border-radius: 8px;
+  padding: 9px 11px;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
   text-align: left;
@@ -232,54 +388,34 @@
 }
 
 .dep-item.selected {
-  border-color: var(--cyan);
-  background: var(--cyan-dim);
+  border-color: var(--accent);
+  background: var(--accent-dim);
 }
 
 .dep-item .name {
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: 12.5px;
 }
 
 .dep-item .reach {
-  font-size: 11.5px;
+  font-size: 11px;
   color: var(--text-faint);
   white-space: nowrap;
-}
-
-.graph-pane {
-  position: relative;
-  min-height: 0;
-}
-
-.graph-empty {
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-faint);
-  font-size: 14px;
-  text-align: center;
-  padding: 40px;
 }
 
 .node-detail {
   position: absolute;
   bottom: 20px;
-  left: 20px;
   right: 20px;
-  max-width: 420px;
-  background: var(--bg-panel);
-  border: 1px solid var(--border-strong);
-  border-radius: 12px;
+  width: 300px;
+  z-index: 9;
   padding: 14px 16px;
-  backdrop-filter: blur(14px);
   font-size: 13px;
 }
 
 .node-detail .k {
   font-family: var(--mono);
-  font-size: 14px;
+  font-size: 13.5px;
   color: var(--text);
   word-break: break-all;
 }

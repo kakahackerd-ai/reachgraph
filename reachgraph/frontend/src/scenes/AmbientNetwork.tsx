@@ -22,9 +22,10 @@ function Network() {
     pts.forEach((p, i) => p.toArray(positions, i * 3))
 
     const palette = [
-      new THREE.Color('#22d3ee'),
-      new THREE.Color('#a78bfa'),
-      new THREE.Color('#fb923c'),
+      new THREE.Color('#5b8fef'),
+      new THREE.Color('#9c8cf0'),
+      new THREE.Color('#e0ab52'),
+      new THREE.Color('#ff6a3d'),
     ]
     const colors = new Float32Array(count * 3)
     pts.forEach((_, i) => {
@@ -69,7 +70,7 @@ function Network() {
         <bufferGeometry>
           <bufferAttribute attach="attributes-position" args={[linePositions, 3]} />
         </bufferGeometry>
-        <lineBasicMaterial color="#22d3ee" transparent opacity={0.12} />
+        <lineBasicMaterial color="#ff6a3d" transparent opacity={0.1} />
       </lineSegments>
     </group>
   )

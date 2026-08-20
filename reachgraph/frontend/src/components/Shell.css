@@ -8,9 +8,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 18px 32px;
+  padding: 16px 28px;
   border-bottom: 1px solid var(--border);
-  background: rgba(5, 7, 13, 0.7);
+  background: rgba(7, 8, 12, 0.7);
   backdrop-filter: blur(10px);
   position: sticky;
   top: 0;
@@ -22,36 +22,37 @@
   align-items: center;
   gap: 10px;
   text-decoration: none;
-  font-weight: 700;
-  font-size: 17px;
+  font-family: var(--sans);
+  font-weight: 800;
+  font-size: 16px;
   letter-spacing: -0.01em;
   color: var(--text);
 }
 
 .shell-logo-mark {
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
-  background: var(--cyan);
-  box-shadow: 0 0 12px 2px var(--cyan);
+  background: var(--accent);
+  box-shadow: 0 0 10px 1px rgba(255, 106, 61, 0.6);
 }
 
 .shell-nav {
   display: flex;
-  gap: 4px;
+  gap: 2px;
   background: var(--bg-raised);
   border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 4px;
+  border-radius: 10px;
+  padding: 3px;
 }
 
 .shell-nav a {
   text-decoration: none;
   color: var(--text-dim);
-  font-size: 14px;
-  font-weight: 500;
-  padding: 7px 16px;
-  border-radius: 999px;
+  font-size: 13.5px;
+  font-weight: 600;
+  padding: 7px 15px;
+  border-radius: 7px;
   transition: color 0.15s, background 0.15s;
 }
 
@@ -60,12 +61,13 @@
 }
 
 .shell-nav a.active {
-  color: #05070d;
-  background: var(--cyan);
+  color: var(--bg);
+  background: var(--accent);
 }
 
 .shell-main {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
